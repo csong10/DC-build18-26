@@ -109,10 +109,17 @@ intrinsic void instruction_sync_barrier(void) { __asm volatile("isb"); }
  */
 intrinsic void wait_for_interrupt(void) { __asm volatile("wfi"); }
 
+/**
+ * @brief pends a pendsv signal to handle rescheduling algo
+ */
 void pend_pendsv(void);
 
 void clear_pendsv(void);
 
+/**
+ * @brief returns the priveledges of the current thread so that it can return
+ *        to the correct priveledge on restoration.
+ */
 int get_svc_status(void);
 
 void set_svc_status(int status);

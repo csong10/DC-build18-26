@@ -67,8 +67,10 @@ int sys_motor_set(enum motor_mapping motor, uint32_t duty_cycle,
  */
 void sys_register_spd_callback(void (*callback) (uint32_t));
 
+/** @brief wrapper for button 1 interrupt handler */
 void btn1_irq_handler(void);
 
+/** @brief wrapper for button 2 interrupt handler */
 void btn2_irq_handler(void);
 
 #endif /* _MOTOR_DRIVER_H_ */

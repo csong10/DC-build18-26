@@ -1,6 +1,16 @@
+/** @file gpio.h
+ *
+ *  @brief  wrappers for general purpose in out pins of arduino
+ *
+ *  @date   January 7, 2026
+ *
+ *  @author Caleb Song
+ */
 #ifndef _GPIO_H_
 #define _GPIO_H_
 #include <unistd.h>
+
+////////////////////////////  CONST  /////////////////////////////////
 
 /** @brief AFIO Registers */
 struct afio_reg_map {
@@ -54,6 +64,10 @@ typedef enum { GPIO_A = 0, GPIO_B = 1, GPIO_C = 2 } gpio_port;
 #define ALT14 0x0E
 #define ALT15 0x0F
 
+////////////////////////////  END CONST  /////////////////////////////////
+
+////////////////////////////  FN HEADER  /////////////////////////////////
+
 void gpio_init(gpio_port port, uint32_t num, uint32_t mode, uint32_t otype,
                uint32_t speed, uint32_t pupd, uint32_t alt);
 
@@ -66,5 +80,7 @@ void gpio_clr(gpio_port port, uint32_t num);
  * Each bit corresponds to its GPIO pin.
  */
 uint32_t gpio_read(gpio_port port, uint32_t channel);
+
+////////////////////////////  END FN HEADER  /////////////////////////////////
 
 #endif /* _GPIO_H_ */

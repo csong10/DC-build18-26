@@ -1,10 +1,10 @@
 /** @file    mpu.h
  *
- *  @brief
+ *  @brief   wrapper for the memory protection unit functions.
  *
- *  @date
+ *  @date    January 7, 2026
  *
- *  @author
+ *  @author  Caleb Song
  */
 #ifndef _MPU_H_
 #define _MPU_H_

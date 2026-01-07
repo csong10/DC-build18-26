@@ -1,7 +1,6 @@
 /* boot.s
  * Assembler startup file for the STM32
- * Ford Seidel  2019-01-31
- * Ronit Banerjee
+ * Caleb Song
  */
 
 # The Cortex M4 is a thumb only processor 
@@ -12,7 +11,6 @@
 
 .global ivt
 ivt:
-@ TODO: add the stack and the reset handler addr here.
 .word   __msp_stack_top     /* stack top address */
 .word   _reset_             /* 1 Reset */
 .word   _nmi_               /* 2 NMI */

@@ -1,4 +1,11 @@
-// James Zhang
+/** @file i2c.h
+ *
+ *  @brief  function headers for I2C protocol 
+ *
+ *  @date   January 7, 2026
+ *
+ *  @author Caleb Song
+ */
 #ifndef _I2C_H_
 #define _I2C_H_
 
