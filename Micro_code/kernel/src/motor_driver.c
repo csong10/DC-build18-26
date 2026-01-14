@@ -9,7 +9,7 @@
 
 #define MAX_DUTY_CYCLE 100
 
-#define NUM_MOTORS UINT32_C(2)
+#define NUM_MOTORS UINT32_C(4)
 
 #define GPIO_MOTOR_IN_ATTR \
     MODE_GP_OUTPUT, OUTPUT_PUSH_PULL, OUTPUT_SPEED_HIGH, PUPD_NONE, ALT0
@@ -19,7 +19,7 @@ static struct motor_attr motors[NUM_MOTORS];
 uint8_t IS_COMP;
 
 void (*spd_callback_fn)(uint32_t up) = NULL;
-
+//EDIT: going to be controlling 4 motors
 void motor_init(enum motor_mapping motor, struct motor_attr *attr,
                 struct encoder_pin_attr *enc_attr)
 {
