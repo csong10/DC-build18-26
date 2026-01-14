@@ -37,6 +37,7 @@ void motor_init(enum motor_mapping motor, struct motor_attr *attr,
     timer_start_pwm(PWM_PERIOD, 0, attr->timer.timer, attr->timer.channel);
 }
 
+//EDIT: going to be controlling 4 motors, to turn stop some motors, enable the rest
 int sys_motor_set(enum motor_mapping motor, uint32_t duty_cycle,
                   direction_t direction)
 {
