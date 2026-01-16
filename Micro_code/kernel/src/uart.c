@@ -12,6 +12,9 @@
 #include <rcc.h>
 #include <uart.h>
 #include <uart_polling.h>
+#include <motor_driver.h>
+#include <encoder.h>
+#include <pwm.h>
 #include <nvic.h>
 #include <gpio.h>
 #include <arm.h>
@@ -47,9 +50,11 @@ struct uart_reg_map {
 #define TX_EMP (1 << 7)
 #define RX_NEMP (1 << 5)
 
-#define MAX_BUF_SZ 25
+#define MAX_BUF_SZ 64
 
 #define UART2_IRQ_NUM 38
+
+#define MIN_DUTY_CYCLE 15
 
 volatile char tx_buf [MAX_BUF_SZ];
 volatile char rx_buf [MAX_BUF_SZ];
@@ -186,6 +191,28 @@ void uart_irq_handler(){
   }
   if (((uart->SR & RX_NEMP) != 0) && !chk_rx_full()) {
     char c = uart->DR;
+
+    //set motor direction as soon as it receives UART from serial port
+    switch(c) {
+      case 'f':
+        sys_motor_set(LEFT_MOTOR, MIN_DUTY_CYCLE, FORWARD);
+        break;
+      case 'b':
+        sys_motor_set(LEFT_MOTOR, MIN_DUTY_CYCLE, BACKWARD);
+        break;
+      case 'r': 
+        sys_motor_set(LEFT_MOTOR, MIN_DUTY_CYCLE, RIGHT);
+        break;
+      case 'l':
+        sys_motor_set(LEFT_MOTOR, MIN_DUTY_CYCLE, LEFT);
+        break;
+      case 'x':
+        sys_motor_set(LEFT_MOTOR, MIN_DUTY_CYCLE, FREE);
+        break;
+      case 's': 
+        sys_motor_set(LEFT_MOTOR, MIN_DUTY_CYCLE, STOP);
+    }
+
     rx_enq(c);
     if (chk_rx_full()) uart->CR1 &= (~RXNE_INT);
   }

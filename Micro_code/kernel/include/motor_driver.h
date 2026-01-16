@@ -12,7 +12,9 @@ typedef enum motor_direction
     FREE = 0,
     FORWARD = 1,
     BACKWARD = 2,
-    STOP = 3
+    STOP = 3,
+    RIGHT = 4,
+    LEFT = 5
 } direction_t;
 
 enum motor_mapping

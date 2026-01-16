@@ -13,3 +13,15 @@ conda create -n cv_test python=3.11 -y
 conda activate cv_test
 pip install opencv-python
 python demo_distance.py
+
+MICRO_CODE SECTION
+How to flash the stm32:
+In one terminal window, cd into Micro_code/
+
+Then run this command: ./osx_ocd (for apple os)
+
+if that doesn't work then update the permission: chmod +x ./osx_ocd
+
+Then in a separate terminal window cd into Micro_code/ 
+
+type <make> and it'll list all the commands, make flash USER_PROJ will load the user code (user_src) onto the stm32 

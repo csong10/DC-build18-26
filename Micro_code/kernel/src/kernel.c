@@ -9,6 +9,7 @@
 #include "arm.h"
 #include "pwm.h"
 #include "motor_driver.h"
+#include "encoder.h"
 #include "exti.h"
 #include "uart.h"
 #include "lcd_driver.h"
@@ -20,11 +21,27 @@
 #define LED_OUT \
     MODE_GP_OUTPUT, OUTPUT_PUSH_PULL, OUTPUT_SPEED_HIGH, PUPD_NONE, ALT0
 
+#define TICKS_PER_REV 1200
+#define MAX_SPEED 10
+#define MIN_SPEED 0
+
+#define MAX_POS (1 << 29)
+
+#define MAX_DUTY_CYCLE 100
+#define MIN_DUTY_CYCLE 15
+
+#define MAX(x,y) (((x) > (y)) ? (x) : (y))
+#define MIN(x,y) (((x) < (y)) ? (x) : (y)) 
+
+#define USR_STACK_WORDS 256
+#define NUM_THREADS 3  
+#define NUM_MUTEXES 0
+#define CLOCK_FREQUENCY 1000
+
 int kernel_main(void) {
     init_349(); // DO NOT REMOVE THIS LINE
     uart_init(BAUD_RATE_115200);
 
-    // CALEB CONSTANTS
 // ENCA1 : PA4 (exti4)
 struct pin enca1 = {.port = GPIO_A, .num = 4, .irq_num = 10},
 // // SERVO : PA1 (PWM2/2)
@@ -45,16 +62,8 @@ motor_enb = {.port = GPIO_B, .num = 4},
 encb2 = {.port = GPIO_B, .num = 10, .irq_num = 40},
 // MOTOR_IN3 : PA8
 motor_in3 = {.port = GPIO_A, .num = 8},
-// BUT1 : PA9 (exti9_5)
-but1 = {.port = GPIO_A, .num = 9, .irq_num = 23},
-// BUT2 : PC7 (exti9_5)
-but2 = {.port = GPIO_C, .num = 7, .irq_num = 23},
-// LEDR : PB6
-ledr = {.port = GPIO_B, .num = 6},
 // MOTOR_IN4 : PA7
-motor_in4 = {.port = GPIO_A, .num = 7},
-// LEDG : PA5
-ledg = {.port = GPIO_A, .num = 5};
+motor_in4 = {.port = GPIO_A, .num = 7};
 // // SDA : PB9
 // sda = {.port = GPIO_B, .num = 9},
 // // SCL : PB8
@@ -82,23 +91,12 @@ struct motor_attr attr_l =
   {.motor_in1 = motor_in2, .motor_in2 = motor_in1, .motor_en = motor_ena,
    .timer = time_l};
 
+   //enc are not used
     motor_init(RIGHT_MOTOR, &attr_r, &enc_r);
-
     motor_init(LEFT_MOTOR, &attr_l, &enc_l);
-    
-    gpio_init(but1.port, but1.num, MODE_INPUT, OUTPUT_OPEN_DRAIN, OUTPUT_SPEED_LOW, PUPD_PULL_UP, ALT0);
-    gpio_init(but2.port, but2.num, MODE_INPUT, OUTPUT_OPEN_DRAIN, OUTPUT_SPEED_LOW, PUPD_PULL_UP, ALT0);
 
-    enable_exti(but1.port, but1.num, FALLING_EDGE);
-    enable_exti(but2.port, but2.num, FALLING_EDGE);
-
-    gpio_init(ledg.port, ledg.num, LED_OUT);
-    gpio_init(ledr.port, ledr.num, LED_OUT);
-
-    i2c_master_init(0);
-    lcd_driver_init();
-
-    enter_user_mode();
+    sys_motor_set(LEFT_MOTOR, MIN_DUTY_CYCLE, STOP);
+    sys_motor_set(RIGHT_MOTOR, MIN_DUTY_CYCLE, STOP);
     while (1) {
     }
     return 0;

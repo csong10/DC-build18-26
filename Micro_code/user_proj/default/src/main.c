@@ -1,6 +1,6 @@
 /** @file main.c
  *
- *  @brief  Lab 5 Fall 2024
+ *  @brief  motor driver
  */
 #include <349_lib.h>
 #include <349_peripheral.h>
@@ -25,7 +25,7 @@
 #define MIN(x,y) (((x) < (y)) ? (x) : (y)) 
 
 #define USR_STACK_WORDS 256
-#define NUM_THREADS 3 //4 //pid left, pid right, uart, lcd 
+#define NUM_THREADS 3  
 #define NUM_MUTEXES 0
 #define CLOCK_FREQUENCY 1000
 

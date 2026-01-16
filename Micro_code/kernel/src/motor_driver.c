@@ -31,7 +31,8 @@ void motor_init(enum motor_mapping motor, struct motor_attr *attr,
               OUTPUT_PUSH_PULL, OUTPUT_SPEED_VERY_HIGH, PUPD_PULL_DOWN,
               attr->timer.gpio_alt);
 
-    encoder_init((enum encoder_mapping)motor, enc_attr);
+    (void) enc_attr;
+    // encoder_init((enum encoder_mapping)motor, enc_attr);
 
     IS_COMP = (attr->timer.is_comp) ? 1 : 0;
     timer_start_pwm(PWM_PERIOD, 0, attr->timer.timer, attr->timer.channel);
