@@ -10,31 +10,25 @@ peer.
 Code for microcontroller (STM32) is adapted largely from Caleb's project in 
 18-349 Introduction to Embedded Systems.
 
-""normally was in python 3.12""
-""conda deactivate"" : to deactivate current env
-Env for AI_module demo:
-conda create -n cv_test python=3.11 -y
-conda activate cv_test
-pip install opencv-python
-python demo_distance.py
+THINGS CALEB HAS LEARNED IN MAKING THIS WORK:
 
-MICRO_CODE SECTION
-How to flash the stm32:
-In one terminal window, cd into Micro_code/
+_TO SSH 2 RPi4_
+Terminal: ssh calebson@192.168.0.126
+enter password when prompted
 
-Then run this command: ./osx_ocd (for apple os)
+If it doesn't work search up how to do it headless but if we have the monitor: hostname -I reveals IP
 
-if that doesn't work then update the permission: chmod +x ./osx_ocd
+_TO CAMERA_
+Terminal: source ~/b18env/bin/activate 
+to activate venv and then cd into Desktop/build18/DC-build18-26/AI_module/
+python3 demo_distance.py
+press 'q' to exit
+#NOTES works well on one face for now from 20 cm - 140 cm
 
-Then in a separate terminal window cd into Micro_code/ 
+_TO DRIVE MOTORS_
+Must be in Micro_code/ to do the rest
+2 terminals: (1) ./osx_ocd (make sure you check your permissions)
+(2) make flash (all code will be in kernel mode, uart interrupts are directly & immed serviced)
+Edit kernel & motor_driver.c and related files to achieve desired result
 
-type <make> and it'll list all the commands, make flash USER_PROJ will load the user code (user_src) onto the stm32 
-
-FOR RPi4
-CAMEERA SECTION
-
-source ~/b18env/bin/activate
-
-Works pretty well on one face, need to test multiple and it can detect faces at 
-most around 150 cm away which should be good enough and can detect faces 27 meters close.
 
