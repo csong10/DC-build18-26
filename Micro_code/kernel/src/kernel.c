@@ -25,10 +25,8 @@
 #define MAX_SPEED 10
 #define MIN_SPEED 0
 
-#define MAX_POS (1 << 29)
-
 #define MAX_DUTY_CYCLE 100
-#define MIN_DUTY_CYCLE 15
+#define MIN_DUTY_CYCLE 20
 
 #define MAX(x,y) (((x) > (y)) ? (x) : (y))
 #define MIN(x,y) (((x) < (y)) ? (x) : (y)) 
@@ -46,15 +44,15 @@ int kernel_main(void) {
 struct pin enca1 = {.port = GPIO_A, .num = 4, .irq_num = 10},
 // // SERVO : PA1 (PWM2/2)
 // srvo = {.port = GPIO_A, .num = 1},
-// MOTOR_IN2 : PB0 (PWM1/2N)
+// MOTOR_IN2 : PB0 (PWM1/2N) A3
 motor_in2 = {.port = GPIO_B, .num = 0},
 // ENCA2 : PC1 (exti1)
 enca2 = {.port = GPIO_C, .num = 1, .irq_num = 7},
 // ENCB1 : PC0 (exti0)
 encb1 = {.port = GPIO_C, .num = 0, .irq_num = 6},
-// MOTOR_IN1 : PA10 
+// MOTOR_IN1 : PA10 D2
 motor_in1 = {.port = GPIO_A, .num = 10},
-// MOTOR_ENA : PB3 (PWM2/2)
+// MOTOR_ENA : PB3 (PWM2/2) D3
 motor_ena = {.port = GPIO_B, .num = 3},
 // MOTOR_ENB : PB4 (PWM3/1)
 motor_enb = {.port = GPIO_B, .num = 4},

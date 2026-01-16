@@ -34,3 +34,7 @@ FOR RPi4
 CAMEERA SECTION
 
 source ~/b18env/bin/activate
+
+Works pretty well on one face, need to test multiple and it can detect faces at 
+most around 150 cm away which should be good enough and can detect faces 27 meters close.
+
