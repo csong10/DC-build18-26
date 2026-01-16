@@ -33,4 +33,4 @@ type <make> and it'll list all the commands, make flash USER_PROJ will load the 
 FOR RPi4
 CAMEERA SECTION
 
-source ~/build18/bin/activate
+source ~/b18env/bin/activate
