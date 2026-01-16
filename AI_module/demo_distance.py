@@ -20,11 +20,13 @@ def calculate_focal_length(known_dist, known_width, width_pix):
 def main():
     print("INITIALIZING: Setting up Face Detector (Haar Cascade)...")
     
-    # 1. Load the Face Detector (Built into OpenCV)
-    # This xml file comes with opencv-python automatically
-    face_cascade = cv2.CascadeClassifier(
-        cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
-    )
+   # NEW WORKING CODE (Looks for the file you just downloaded) 
+    face_cascade = cv2.CascadeClassifier('haarcascade_frontalface_default.xml')
+
+    # Safety check to make sure it loaded
+    if face_cascade.empty():
+        print("ERROR: Could not find 'haarcascade_frontalface_default.xml'. Did you run the wget command?")
+        exit()
 
     print("INITIALIZING: Setting up IMX708 Camera...")
     try:
