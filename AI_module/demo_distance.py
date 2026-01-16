@@ -2,6 +2,18 @@ import cv2
 import numpy as np
 import tflite_runtime.interpreter as tflite
 
+MODEL_PATH = "models/ssd_mobilenet_v2_coco_quant_postprocess_edgetpu.tflite"
+
+try:
+    delegate = tflite.load_delegate('libedgetpu.so.1')
+    interpreter = tflite.Interpreter(model_path=MODEL_PATH, experimental_delegates=[delegate])
+    print("SUCCESS: Google Coral found! Acceleration ENABLED.")
+except ValueError:
+    print("WARNING: Coral not found or drivers missing. Falling back to CPU (SLOWER).")
+    interpreter = tflite.Interpreter(model_path=MODEL_PATH)
+    
+interpreter.allocate_tensors()
+
 # --- CONSTANTS ---
 # Person detection usually requires a different calibration than faces
 # because a "person" (full body) is much wider/taller.
@@ -11,7 +23,7 @@ DISTANCE_CM = 100.0
 PIX_WIDTH = 150   # Measure this again with the new model!
 
 # Path to the COCO model (detects people, cars, dogs, etc.)
-MODEL_PATH = "models/ssd_mobilenet_v2_coco_quant_postprocess_edgetpu.tflite"
+MODEL_PATH = "~/models/ssd_mobilenet_v2_coco_quant_postprocess_edgetpu.tflite"
 
 def get_arducam_pipeline(width=640, height=480, framerate=30):
     """
@@ -31,7 +43,7 @@ def calculate_focal_length(known_dist, known_width, width_pix):
     return (width_pix * known_dist) / known_width
 
 def main():
-    # 1. Setup Coral TPU
+    print("1. Setup Coral TPU")
     interpreter = tflite.Interpreter(
         model_path=MODEL_PATH,
         experimental_delegates=[tflite.load_delegate('libedgetpu.so.1')]
@@ -43,7 +55,7 @@ def main():
     h_model = input_details[0]['shape'][1]
     w_model = input_details[0]['shape'][2]
 
-    # 2. Initialize Arducam (Try GStreamer first, fall back to index 0)
+    print("2. Initialize Arducam (Try GStreamer first, fall back to index 0)")
     print("Attempting to open Arducam via GStreamer...")
     cap = cv2.VideoCapture(get_arducam_pipeline(), cv2.CAP_GSTREAMER)
     

@@ -29,3 +29,8 @@ if that doesn't work then update the permission: chmod +x ./osx_ocd
 Then in a separate terminal window cd into Micro_code/ 
 
 type <make> and it'll list all the commands, make flash USER_PROJ will load the user code (user_src) onto the stm32 
+
+FOR RPi4
+CAMEERA SECTION
+
+source ~/build18/bin/activate
