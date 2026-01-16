@@ -8,7 +8,7 @@ from picamera2 import Picamera2
 PROCESS_WIDTH = 400
 WIDTH_CM = 14.0   # Average width of a human face (ear to ear)
 DISTANCE_CM = 50.0 # Calibrate at 50cm
-PIX_WIDTH = 60   # <--- MEASURE THIS AGAIN for the face!
+PIX_WIDTH = 120   # <--- MEASURE THIS AGAIN for the face!
 
 def distance_to_camera(known_width, focal_length, pixel_width):
     if pixel_width == 0: return 0
