@@ -87,7 +87,7 @@ def get_beacon_rssi_and_distance(scanner: Scanner):
     tx_power_values = []
 
     for _ in range(SAMPLES_PER_READING):
-        devices = scanner.scan(0.1)  # 0.1s scan window
+        devices = scanner.scan(0.01)  # 0.01s scan window
         for dev in devices:
             data = parse_ibeacon(dev)
             if data:
