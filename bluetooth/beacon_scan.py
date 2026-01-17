@@ -11,7 +11,7 @@ import time
 TARGET_UUID = "dc672026bd1866667777674206742067".lower()
 
 # How many quick scans to average together for smoothing
-SAMPLES_PER_READING = 5
+SAMPLES_PER_READING = 2
 
 # Path loss exponent (2.0 = open space, 3–4 = indoors/cluttered)
 PATH_LOSS_N = 2.0
@@ -87,7 +87,7 @@ def get_beacon_rssi_and_distance(scanner: Scanner):
     tx_power_values = []
 
     for _ in range(SAMPLES_PER_READING):
-        devices = scanner.scan(0.4)  # 0.4s scan window
+        devices = scanner.scan(0.1)  # 0.1s scan window
         for dev in devices:
             data = parse_ibeacon(dev)
             if data:
