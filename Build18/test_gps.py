@@ -32,8 +32,8 @@ import numpy as np
 #       (Use Google Maps -> Right Click -> "What's here?" to get them)  #
 # --------------------------------------------------------------------- #
 
-DESTINATION_LAT = 40.443322  # <--- REPLACE WITH TARGET LATITUDE
-DESTINATION_LON = -79.943644 # <--- REPLACE WITH TARGET LONGITUDE
+DESTINATION_LAT = 26.960  # <--- REPLACE WITH TARGET LATITUDE
+DESTINATION_LON = -57.039 # <--- REPLACE WITH TARGET LONGITUDE
 
 # --------------------------------------------------------------------- #
 
