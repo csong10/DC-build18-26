@@ -1,14 +1,22 @@
 #!/usr/bin/env python3
 """
-RC Car "Phone Driver" - Autonomous Navigation
-==============================================
-The Phone is mounted ON the robot (Robot = Phone Position).
-The Robot drives to the HARDCODED destination below.
+RC Car Threaded Controller - Camera + GPS Navigation
+=====================================================
 
-Includes:
-- Face Detection (Safety Stop)
-- Obstacle Avoidance (Path of Least Resistance)
-- GPS Navigation (Phone -> Hardcoded Point)
+This script controls an RC car using:
+- GPS navigation to phone location (via GPS2IP app)
+- Camera vision for obstacle avoidance
+- Path of least resistance turning logic
+- Motor control via Arduino USB Serial
+
+Run with: sudo python3 rc_car_threaded.py
+
+GPS2IP Setup (iPhone):
+1. Install GPS2IP app
+2. Settings: UDP Push, IP = Pi's IP, Port = 11123
+3. Enable GGA and RMC messages
+4. Enable Background Mode
+5. Start streaming
 """
 
 import threading
@@ -20,15 +28,7 @@ import numpy as np
 import serial
 from picamera2 import Picamera2
 
-# ===================== 📍 DESTINATION SETTINGS 📍 ===================== #
-# --------------------------------------------------------------------- #
-#       ENTER THE GPS COORDINATES OF YOUR TARGET DESTINATION BELOW      #
-# --------------------------------------------------------------------- #
-
-DESTINATION_LAT = 40.443322  # <--- REPLACE WITH TARGET LATITUDE
-DESTINATION_LON = -79.943644 # <--- REPLACE WITH TARGET LONGITUDE
-
-# --------------------------------------------------------------------- #
+# ===================== CONFIGURATION ===================== #
 
 # Camera Config
 FACE_WIDTH_CM = 14.0
@@ -39,266 +39,524 @@ CALIBRATION_PIX_WIDTH = 140
 ARDUINO_PORT = '/dev/ttyACM0'  
 ARDUINO_BAUDRATE = 9600
 
-# Thresholds
-DANGER_DISTANCE = 40.0        # Stop if face is closer than this
-SAFE_DISTANCE = 100.0         # Avoid obstacles closer than this
-OBSTACLE_AREA_THRESHOLD = 0.08
-WAYPOINT_REACHED_DISTANCE = 3.0 # Meters
-HEADING_TOLERANCE = 15.0        # Degrees
+# Decision Thresholds
+DANGER_DISTANCE = 40.0        # Stop if obstacle closer than this (cm)
+SAFE_DISTANCE = 100.0         # Slow down under this distance
 
-# GPS Config
+# Obstacle Avoidance Config
+OBSTACLE_AREA_THRESHOLD = 0.08
+TURN_DURATION = 0.5
+
+# GPS Config (for GPS2IP app)
 GPS_UDP_IP = "0.0.0.0"
 GPS_UDP_PORT = 11123
 GPS_TIMEOUT = 5
+
+# Navigation Config
+WAYPOINT_REACHED_DISTANCE = 3.0   # meters
+HEADING_TOLERANCE = 15.0          # degrees
+
+# Robot starting position (update to your location)
+ROBOT_START_LAT = 40.4433
+ROBOT_START_LON = -79.9436
+
+# Enable/Disable GPS navigation
 GPS_ENABLED = True
 
-# ===================== MATH FUNCTIONS ===================== #
+# ===================== GPS FUNCTIONS ===================== #
 
 def parse_nmea_coordinate(coord_str, direction):
-    if not coord_str: return None
+    """Parse NMEA coordinate to decimal degrees."""
+    if not coord_str:
+        return None
     try:
         coord = float(coord_str)
-        deg = int(coord / 100)
-        mins = coord - (deg * 100)
-        val = deg + (mins / 60.0)
-        if direction in ['S', 'W']: val = -val
-        return val
-    except: return None
+        degrees = int(coord / 100)
+        minutes = coord - (degrees * 100)
+        decimal = degrees + (minutes / 60.0)
+        if direction in ['S', 'W']:
+            decimal = -decimal
+        return decimal
+    except:
+        return None
 
-def parse_gprmc(line):
+def parse_gprmc(sentence):
+    """Parse $GPRMC sentence."""
     try:
-        parts = line.split(',')
-        if len(parts) < 8 or parts[2] != 'A': return None
+        parts = sentence.split(',')
+        if len(parts) < 8 or parts[2] != 'A':
+            return None
+        
         lat = parse_nmea_coordinate(parts[3], parts[4])
         lon = parse_nmea_coordinate(parts[5], parts[6])
-        course = float(parts[8]) if parts[8] else 0.0
-        if lat and lon: return {'lat': lat, 'lon': lon, 'course': course}
-    except: pass
+        
+        if lat and lon:
+            return {'lat': lat, 'lon': lon, 'valid': True}
+    except:
+        pass
     return None
 
-def parse_gpgga(line):
+def parse_gpgga(sentence):
+    """Parse $GPGGA sentence."""
     try:
-        parts = line.split(',')
-        if len(parts) < 10 or int(parts[6] or 0) == 0: return None
+        parts = sentence.split(',')
+        if len(parts) < 10 or int(parts[6] or 0) == 0:
+            return None
+        
         lat = parse_nmea_coordinate(parts[2], parts[3])
         lon = parse_nmea_coordinate(parts[4], parts[5])
-        if lat and lon: return {'lat': lat, 'lon': lon}
-    except: pass
+        
+        if lat and lon:
+            return {'lat': lat, 'lon': lon, 'valid': True}
+    except:
+        pass
     return None
 
-def haversine(lat1, lon1, lat2, lon2):
-    R = 6371000 # Earth radius in meters
-    p1, p2 = math.radians(lat1), math.radians(lat2)
-    dp = math.radians(lat2 - lat1)
-    dl = math.radians(lon2 - lon1)
-    a = math.sin(dp/2)**2 + math.cos(p1)*math.cos(p2)*math.sin(dl/2)**2
+def haversine_distance(lat1, lon1, lat2, lon2):
+    """Calculate distance between two GPS points in meters."""
+    R = 6371000
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    delta_phi = math.radians(lat2 - lat1)
+    delta_lambda = math.radians(lon2 - lon1)
+    
+    a = math.sin(delta_phi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(delta_lambda/2)**2
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
 
-def calc_bearing(lat1, lon1, lat2, lon2):
-    p1, p2 = math.radians(lat1), math.radians(lat2)
-    dl = math.radians(lon2 - lon1)
-    x = math.sin(dl) * math.cos(p2)
-    y = math.cos(p1)*math.sin(p2) - math.sin(p1)*math.cos(p2)*math.cos(dl)
-    return (math.degrees(math.atan2(x, y)) + 360) % 360
+def calculate_bearing(lat1, lon1, lat2, lon2):
+    """Calculate bearing from point 1 to point 2 (0-360, 0=North)."""
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    delta_lambda = math.radians(lon2 - lon1)
+    
+    x = math.sin(delta_lambda) * math.cos(phi2)
+    y = math.cos(phi1)*math.sin(phi2) - math.sin(phi1)*math.cos(phi2)*math.cos(delta_lambda)
+    
+    bearing = math.degrees(math.atan2(x, y))
+    return (bearing + 360) % 360
 
-def bearing_to_turn(current, target):
-    diff = (target - current + 360) % 360
-    if diff < HEADING_TOLERANCE or diff > (360 - HEADING_TOLERANCE): return 'forward'
-    return 'right' if diff <= 180 else 'left'
+def bearing_to_turn(current_heading, target_bearing):
+    """Determine turn direction to reach target bearing."""
+    diff = (target_bearing - current_heading + 360) % 360
+    
+    if diff < HEADING_TOLERANCE or diff > (360 - HEADING_TOLERANCE):
+        return 'straight', diff
+    elif diff <= 180:
+        return 'right', diff
+    else:
+        return 'left', 360 - diff
+
+# ===================== CAMERA FUNCTIONS ===================== #
+
+def calculate_focal_length(known_dist, known_width, width_pix):
+    return (width_pix * known_dist) / known_width
+
+def distance_to_camera(known_width, focal_length, pixel_width):
+    if pixel_width == 0:
+        return float('inf')
+    return (known_width * focal_length) / pixel_width
+
+def analyze_path_clearance(edges, width, height):
+    """Analyze which side has fewer obstacles."""
+    mid = width // 2
+    left_edges = np.sum(edges[:, :mid] > 0)
+    right_edges = np.sum(edges[:, mid:] > 0)
+    
+    total = left_edges + right_edges
+    if total == 0:
+        return 'equal', left_edges, right_edges
+    
+    diff_ratio = abs(left_edges - right_edges) / total
+    
+    if diff_ratio < 0.1:
+        return 'equal', left_edges, right_edges
+    elif left_edges < right_edges:
+        return 'left', left_edges, right_edges
+    else:
+        return 'right', left_edges, right_edges
 
 # ===================== MAIN CONTROLLER ===================== #
 
 class RCCarController:
     def __init__(self):
-        # State
-        self.robot_lat = None
-        self.robot_lon = None
-        self.robot_heading = 0.0
-        self.dist_to_dest = None
-        self.bearing_to_dest = None
-        
-        self.face_dist = None
+        # Camera data
+        self.face_distance = None
+        self.face_position = None
         self.obstacle_detected = False
+        self.obstacle_distance = 100.0
         self.clearer_path = "equal"
+        
+        # GPS data
+        self.goal_lat = None
+        self.goal_lon = None
+        self.goal_distance = None
+        self.goal_bearing = None
+        self.robot_lat = ROBOT_START_LAT
+        self.robot_lon = ROBOT_START_LON
+        self.robot_heading = 0.0  # Assume facing North initially
         
         self.running = True
         self.current_mode = "STARTING"
+        
+        # Locks
         self.data_lock = threading.Lock()
         
         # Hardware
         self.arduino = None
         self.picam2 = None
-        self.gps_socket = None
         self.face_cascade = None
+        self.focal_length = None
+        self.gps_socket = None
         
-        self.CMD_MAP = {"forward": b'F', "backward": b'B', "left": b'L', "right": b'R', "stop": b'S'}
+        self.CMD_MAP = {
+            "forward": b'F',
+            "backward": b'B',
+            "left": b'L',
+            "right": b'R',
+            "stop": b'S',
+        }
 
     def initialize(self):
+        print("[INIT] Starting initialization...")
+        
         # Arduino
         try:
             self.arduino = serial.Serial(ARDUINO_PORT, ARDUINO_BAUDRATE, timeout=1)
             time.sleep(2)
-            print("[INIT] ✓ Arduino Connected")
-        except: print("[INIT] ✗ Arduino Failed"); return False
-
+            print(f"[INIT] ✓ Arduino on {ARDUINO_PORT}")
+        except Exception as e:
+            print(f"[INIT] ✗ Arduino failed: {e}")
+            return False
+        
         # Camera
         try:
             self.face_cascade = cv2.CascadeClassifier('haarcascade_frontalface_default.xml')
+            if self.face_cascade.empty():
+                print("[INIT] ⚠ Haar cascade not found")
+                self.face_cascade = None
+            
             self.picam2 = Picamera2()
-            config = self.picam2.create_video_configuration(main={"format": "RGB888", "size": (640, 480)})
+            config = self.picam2.create_video_configuration(
+                main={"format": "RGB888", "size": (640, 480)}
+            )
             self.picam2.configure(config)
             self.picam2.start()
-            print("[INIT] ✓ Camera Ready")
-        except: print("[INIT] ✗ Camera Failed"); return False
-
-        # GPS
-        try:
-            self.gps_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self.gps_socket.bind((GPS_UDP_IP, GPS_UDP_PORT))
-            self.gps_socket.settimeout(GPS_TIMEOUT)
-            print("[INIT] ✓ GPS Listening")
-        except: print("[INIT] ✗ GPS Failed"); return False
+            time.sleep(1)
+            
+            self.focal_length = calculate_focal_length(
+                CALIBRATION_DISTANCE_CM, FACE_WIDTH_CM, CALIBRATION_PIX_WIDTH
+            )
+            print("[INIT] ✓ Camera ready")
+        except Exception as e:
+            print(f"[INIT] ✗ Camera failed: {e}")
+            return False
         
+        # GPS
+        if GPS_ENABLED:
+            try:
+                self.gps_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                self.gps_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                self.gps_socket.bind((GPS_UDP_IP, GPS_UDP_PORT))
+                self.gps_socket.settimeout(GPS_TIMEOUT)
+                print(f"[INIT] ✓ GPS listening on port {GPS_UDP_PORT}")
+            except Exception as e:
+                print(f"[INIT] ⚠ GPS failed: {e} - running without GPS")
+                self.gps_socket = None
+        else:
+            print("[INIT] GPS disabled")
+        
+        print("[INIT] ✓ All systems ready!")
         return True
 
-    def gps_thread(self):
-        while self.running:
-            try:
-                data, _ = self.gps_socket.recvfrom(1024)
-                line = data.decode('utf-8').strip()
-                
-                res = None
-                if '$GPRMC' in line:
-                    res = parse_gprmc(line)
-                elif '$GPGGA' in line:
-                    res = parse_gpgga(line)
-                
-                if res:
-                    # Calculate navigation FROM Robot (Phone) TO Destination
-                    d = haversine(res['lat'], res['lon'], DESTINATION_LAT, DESTINATION_LON)
-                    b = calc_bearing(res['lat'], res['lon'], DESTINATION_LAT, DESTINATION_LON)
-                    
-                    with self.data_lock:
-                        self.robot_lat = res['lat']
-                        self.robot_lon = res['lon']
-                        
-                        # Only update heading if we have speed/course info (GPRMC)
-                        if 'course' in res and res['course'] > 0: 
-                            self.robot_heading = res['course']
-                            
-                        self.dist_to_dest = d
-                        self.bearing_to_dest = b
-            except: pass
+    def get_best_turn(self, obstacle_pos, clearer_path):
+        """Get best turn direction using path of least resistance."""
+        if clearer_path == 'left':
+            return 'left'
+        elif clearer_path == 'right':
+            return 'right'
+        
+        if obstacle_pos == 'left':
+            return 'right'
+        elif obstacle_pos == 'right':
+            return 'left'
+        
+        return 'right'
 
     def camera_thread(self):
+        print("[CAM] Thread started")
+        
         while self.running:
             try:
+                if self.picam2 is None:
+                    time.sleep(1)
+                    continue
+                
                 frame = self.picam2.capture_array()
-                if frame is None: continue
+                if frame is None:
+                    continue
+                
+                height, width = frame.shape[:2]
+                frame_area = height * width
                 gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
                 
-                # Face Detection
-                f_dist = None
-                if self.face_cascade:
-                    faces = self.face_cascade.detectMultiScale(gray, 1.1, 4)
+                # Face detection
+                face_dist = None
+                face_pos = None
+                
+                if self.face_cascade is not None:
+                    faces = self.face_cascade.detectMultiScale(
+                        gray, scaleFactor=1.05, minNeighbors=4, minSize=(30, 30)
+                    )
+                    
                     if len(faces) > 0:
-                        w = faces[0][2]
-                        f_dist = (14.0 * 500) / w # Approx focal calc
+                        faces = sorted(faces, key=lambda x: x[2], reverse=True)
+                        x, y, w, h = faces[0]
+                        face_dist = distance_to_camera(FACE_WIDTH_CM, self.focal_length, w)
+                        face_x = x + w // 2
+                        
+                        if face_x < width // 3:
+                            face_pos = 'left'
+                        elif face_x > 2 * width // 3:
+                            face_pos = 'right'
+                        else:
+                            face_pos = 'center'
                 
-                # Obstacle Detection
-                edges = cv2.Canny(cv2.GaussianBlur(gray, (5,5), 0), 50, 150)
-                roi = edges[160:, :] # Bottom 2/3 of screen
-                h, w = roi.shape
+                # Edge detection for obstacles
+                blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+                edges = cv2.Canny(blurred, 50, 150)
+                roi = edges[height//3:, :]
                 
-                left_sum = np.sum(roi[:, :w//2])
-                right_sum = np.sum(roi[:, w//2:])
-                clr = 'left' if left_sum < right_sum else 'right'
-                obs = (np.sum(roi > 0) / (w*h)) > OBSTACLE_AREA_THRESHOLD
+                clearer_path, _, _ = analyze_path_clearance(roi, width, height - height//3)
+                
+                # Obstacle detection
+                obstacle_detected = False
+                obstacle_dist = 100.0
+                
+                if face_dist is None:
+                    contours, _ = cv2.findContours(roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    for contour in contours:
+                        area = cv2.contourArea(contour)
+                        area_ratio = area / frame_area
+                        if area_ratio > OBSTACLE_AREA_THRESHOLD:
+                            obstacle_detected = True
+                            obstacle_dist = max(0, 100 - (area_ratio * 500))
+                            break
                 
                 with self.data_lock:
-                    self.face_dist = f_dist
-                    self.obstacle_detected = obs
-                    self.clearer_path = clr
+                    self.face_distance = face_dist
+                    self.face_position = face_pos
+                    self.obstacle_detected = obstacle_detected
+                    self.obstacle_distance = obstacle_dist
+                    self.clearer_path = clearer_path
+                
                 time.sleep(0.05)
-            except: pass
+                
+            except Exception as e:
+                print(f"[CAM] Error: {e}")
+                time.sleep(0.5)
+        
+        print("[CAM] Thread stopped")
+
+    def gps_thread(self):
+        if self.gps_socket is None:
+            print("[GPS] No socket - thread exiting")
+            return
+        
+        print("[GPS] Thread started - waiting for phone location...")
+        
+        while self.running:
+            try:
+                data, addr = self.gps_socket.recvfrom(1024)
+                line = data.decode('utf-8').strip()
+                
+                result = None
+                if '$GPRMC' in line or '$GNRMC' in line:
+                    result = parse_gprmc(line)
+                elif '$GPGGA' in line or '$GNGGA' in line:
+                    result = parse_gpgga(line)
+                
+                if result:
+                    goal_lat = result['lat']
+                    goal_lon = result['lon']
+                    
+                    distance = haversine_distance(
+                        self.robot_lat, self.robot_lon, goal_lat, goal_lon
+                    )
+                    bearing = calculate_bearing(
+                        self.robot_lat, self.robot_lon, goal_lat, goal_lon
+                    )
+                    
+                    with self.data_lock:
+                        self.goal_lat = goal_lat
+                        self.goal_lon = goal_lon
+                        self.goal_distance = distance
+                        self.goal_bearing = bearing
+                    
+            except socket.timeout:
+                continue
+            except Exception as e:
+                print(f"[GPS] Error: {e}")
+                time.sleep(1)
+        
+        print("[GPS] Thread stopped")
 
     def motor_thread(self):
-        last_cmd = None
+        print("[MOTOR] Thread started")
+        last_command = None
+        avoiding_since = None
+        
         while self.running:
             with self.data_lock:
-                f_dist = self.face_dist
-                obs = self.obstacle_detected
-                clr = self.clearer_path
-                dist = self.dist_to_dest
-                bear = self.bearing_to_dest
-                head = self.robot_heading
+                face_dist = self.face_distance
+                face_pos = self.face_position
+                obstacle = self.obstacle_detected
+                obstacle_dist = self.obstacle_distance
+                clearer = self.clearer_path
+                goal_dist = self.goal_distance
+                goal_bearing = self.goal_bearing
             
-            cmd = "stop"
+            command = "forward"
             
-            # PRIORITY 1: Safety (Face)
-            if f_dist and f_dist < DANGER_DISTANCE:
-                self.current_mode = "STOP (Face)"
-                cmd = "stop"
+            # PRIORITY 1: Face too close - STOP
+            if face_dist is not None and face_dist < DANGER_DISTANCE:
+                self.current_mode = "STOPPED_FACE"
+                command = "stop"
+                avoiding_since = None
             
-            # PRIORITY 2: Obstacle Avoidance
-            elif obs:
-                self.current_mode = f"AVOID ({clr})"
-                cmd = clr # 'left' or 'right'
-            
-            # PRIORITY 3: GPS Navigation
-            elif dist is not None:
-                if dist < WAYPOINT_REACHED_DISTANCE:
-                    self.current_mode = "ARRIVED"
-                    cmd = "stop"
+            # PRIORITY 2: Face or obstacle - AVOID
+            elif (face_dist is not None and face_dist < SAFE_DISTANCE) or \
+                 (obstacle and obstacle_dist < 30):
+                self.current_mode = "AVOIDING"
+                
+                if avoiding_since is None:
+                    avoiding_since = time.time()
+                
+                if time.time() - avoiding_since < TURN_DURATION * 2:
+                    turn_dir = self.get_best_turn(face_pos or 'center', clearer)
+                    command = turn_dir
+                elif time.time() - avoiding_since < TURN_DURATION * 4:
+                    command = "backward"
                 else:
-                    turn = bearing_to_turn(head, bear)
-                    self.current_mode = f"NAV: {turn} ({dist:.1f}m)"
-                    cmd = turn
+                    avoiding_since = None
             
-            # PRIORITY 4: No GPS Signal
+            # PRIORITY 3: Navigate to GPS goal
+            elif goal_dist is not None and goal_bearing is not None:
+                avoiding_since = None
+                
+                if goal_dist < WAYPOINT_REACHED_DISTANCE:
+                    self.current_mode = "GOAL_REACHED"
+                    command = "stop"
+                else:
+                    turn_dir, turn_angle = bearing_to_turn(self.robot_heading, goal_bearing)
+                    
+                    if turn_dir == 'straight' or turn_angle < HEADING_TOLERANCE:
+                        self.current_mode = "NAVIGATING"
+                        command = "forward"
+                    else:
+                        self.current_mode = "TURNING"
+                        command = turn_dir
+            
+            # PRIORITY 4: No GPS - cautious forward
+            elif obstacle and obstacle_dist < 60:
+                self.current_mode = "CAUTIOUS"
+                avoiding_since = None
+                command = "forward"
+            
+            # PRIORITY 5: Clear path
             else:
-                self.current_mode = "WAITING GPS"
-                cmd = "stop"
-
-            if cmd != last_cmd:
-                self.arduino.write(self.CMD_MAP.get(cmd, b'S'))
-                print(f"[MOTOR] {cmd.upper()} | {self.current_mode}")
-                last_cmd = cmd
-            time.sleep(0.1)
+                self.current_mode = "FORWARD"
+                avoiding_since = None
+                command = "forward"
             
+            if command != last_command:
+                self.send_command(command)
+                last_command = command
+            
+            time.sleep(0.1)
+        
+        self.send_command("stop")
+        print("[MOTOR] Thread stopped")
+
+    def send_command(self, cmd_str):
+        if self.arduino and self.arduino.is_open and cmd_str in self.CMD_MAP:
+            self.arduino.write(self.CMD_MAP[cmd_str])
+            print(f"[MOTOR] {cmd_str.upper()} | Mode: {self.current_mode}")
+
     def status_thread(self):
-        """Prints status updates every 2 seconds"""
+        print("[STATUS] Thread started")
+        
         while self.running:
             with self.data_lock:
-                lat = self.robot_lat if self.robot_lat else 0.0
-                lon = self.robot_lon if self.robot_lon else 0.0
-                print(f"[STATUS] {self.current_mode} | Robot: {lat:.6f},{lon:.6f} | Hdg: {self.robot_heading:.1f}")
-            time.sleep(2.0)
+                face_dist = self.face_distance
+                obstacle = self.obstacle_detected
+                obstacle_dist = self.obstacle_distance
+                clearer = self.clearer_path
+                goal_dist = self.goal_distance
+                goal_bearing = self.goal_bearing
+            
+            parts = [f"Mode: {self.current_mode}"]
+            
+            if face_dist:
+                parts.append(f"Face: {face_dist:.1f}cm")
+            if obstacle:
+                parts.append(f"Obstacle: {obstacle_dist:.0f}")
+            if goal_dist:
+                parts.append(f"Goal: {goal_dist:.1f}m @ {goal_bearing:.0f}°")
+            
+            parts.append(f"Clearer: {clearer}")
+            
+            print(f"[STATUS] {' | '.join(parts)}")
+            time.sleep(2)
+        
+        print("[STATUS] Thread stopped")
 
     def start(self):
-        if not self.initialize(): return
+        if not self.initialize():
+            print("[ERROR] Initialization failed")
+            return
         
-        # Start all threads
-        threading.Thread(target=self.camera_thread, daemon=True).start()
-        threading.Thread(target=self.gps_thread, daemon=True).start()
-        threading.Thread(target=self.motor_thread, daemon=True).start()
-        threading.Thread(target=self.status_thread, daemon=True).start()
+        threads = [
+            threading.Thread(target=self.camera_thread, daemon=True, name="Camera"),
+            threading.Thread(target=self.motor_thread, daemon=True, name="Motor"),
+            threading.Thread(target=self.status_thread, daemon=True, name="Status"),
+        ]
+        
+        if GPS_ENABLED and self.gps_socket:
+            threads.append(threading.Thread(target=self.gps_thread, daemon=True, name="GPS"))
+        
+        for t in threads:
+            t.start()
         
         print("\n" + "="*50)
-        print(" RC CAR AUTONOMOUS DRIVER (PHONE MODE)")
-        print(f" DESTINATION: {DESTINATION_LAT}, {DESTINATION_LON}")
-        print(" CTRL+C to Stop")
+        print("RC CAR - GPS NAVIGATION + OBSTACLE AVOIDANCE")
+        print("="*50)
+        print(f"GPS: {'Enabled' if GPS_ENABLED else 'Disabled'}")
+        print(f"Robot position: {self.robot_lat:.6f}, {self.robot_lon:.6f}")
+        print("Press Ctrl+C to stop")
         print("="*50 + "\n")
         
         try:
-            while True: time.sleep(1)
+            while True:
+                time.sleep(1)
         except KeyboardInterrupt:
-            self.running = False
+            print("\n[MAIN] Shutting down...")
+            self.stop()
+
+    def stop(self):
+        self.running = False
+        time.sleep(0.5)
+        
+        if self.arduino:
             self.arduino.write(b'S')
             self.arduino.close()
+        
+        if self.picam2:
             self.picam2.stop()
+        
+        if self.gps_socket:
             self.gps_socket.close()
-            print("\n[MAIN] System Stopped.")
+        
+        print("[MAIN] Stopped")
+
 
 if __name__ == "__main__":
-    RCCarController().start()
+    controller = RCCarController()
+    controller.start()
