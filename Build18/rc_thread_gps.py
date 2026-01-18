@@ -491,6 +491,8 @@ class RCCarController:
                 clearer = self.clearer_path
                 goal_dist = self.goal_distance
                 goal_bearing = self.goal_bearing
+                goal_lat = self.goal_lat
+                goal_lon = self.goal_lon
             
             parts = [f"Mode: {self.current_mode}"]
             
@@ -498,7 +500,8 @@ class RCCarController:
                 parts.append(f"Face: {face_dist:.1f}cm")
             if obstacle:
                 parts.append(f"Obstacle: {obstacle_dist:.0f}")
-            if goal_dist:
+            if goal_dist and goal_lat and goal_lon:
+                parts.append(f"Phone: [{goal_lat:.5f}, {goal_lon:.5f}]")
                 parts.append(f"Goal: {goal_dist:.1f}m @ {goal_bearing:.0f}°")
             
             parts.append(f"Clearer: {clearer}")
