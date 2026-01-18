@@ -1,21 +1,28 @@
 #!/usr/bin/env python3
 """
-RC Car Threaded Controller - Camera-Based Obstacle Avoidance
-=============================================================
+RC Car Threaded Controller - Camera + GPS Navigation
+=====================================================
 
 This script controls an RC car using:
-- Camera vision for obstacle detection (faces + general obstacles)
-- Motor control via Arduino USB Serial
-- Threaded architecture for concurrent processing
+- GPS navigation to phone location (via GPS2IP app)
+- Camera vision for obstacle avoidance
 - Path of least resistance turning logic
-
-Based on original rc_car_threaded.py with Bluetooth removed.
+- Motor control via Arduino USB Serial
 
 Run with: sudo python3 rc_car_threaded.py
+
+GPS2IP Setup (iPhone):
+1. Install GPS2IP app
+2. Settings: UDP Push, IP = Pi's IP, Port = 11123
+3. Enable GGA and RMC messages
+4. Enable Background Mode
+5. Start streaming
 """
 
 import threading
 import time
+import socket
+import math
 import cv2
 import numpy as np
 import serial
@@ -23,101 +30,182 @@ from picamera2 import Picamera2
 
 # ===================== CONFIGURATION ===================== #
 
-# Camera Config (preserved from original)
+# Camera Config
 FACE_WIDTH_CM = 14.0
 CALIBRATION_DISTANCE_CM = 50.0
 CALIBRATION_PIX_WIDTH = 140
 
 # ARDUINO CONNECTION Config
 ARDUINO_PORT = '/dev/ttyACM0'  
-ARDUINO_BAUDRATE = 9600  # Must match Arduino Serial.begin(9600)        
+ARDUINO_BAUDRATE = 9600
 
-# Decision Thresholds (preserved from original)
+# Decision Thresholds
 DANGER_DISTANCE = 40.0        # Stop if obstacle closer than this (cm)
-SAFE_DISTANCE = 100.0         # Slow down / be cautious under this distance
+SAFE_DISTANCE = 100.0         # Slow down under this distance
 
 # Obstacle Avoidance Config
-OBSTACLE_AREA_THRESHOLD = 0.08    # Minimum contour area ratio to detect as obstacle (8% of frame)
-OBSTACLE_CLOSE_THRESHOLD = 0.15   # Contour area ratio indicating obstacle is very close (15%)
-TURN_DURATION = 0.5               # How long to turn when avoiding (seconds)
+OBSTACLE_AREA_THRESHOLD = 0.08
+TURN_DURATION = 0.5
+
+# GPS Config (for GPS2IP app)
+GPS_UDP_IP = "0.0.0.0"
+GPS_UDP_PORT = 11123
+GPS_TIMEOUT = 5
+
+# Navigation Config
+WAYPOINT_REACHED_DISTANCE = 3.0   # meters
+HEADING_TOLERANCE = 15.0          # degrees
+
+# Robot starting position (update to your location)
+ROBOT_START_LAT = 40.4433
+ROBOT_START_LON = -79.9436
+
+# Enable/Disable GPS navigation
+GPS_ENABLED = True
+
+# ===================== GPS FUNCTIONS ===================== #
+
+def parse_nmea_coordinate(coord_str, direction):
+    """Parse NMEA coordinate to decimal degrees."""
+    if not coord_str:
+        return None
+    try:
+        coord = float(coord_str)
+        degrees = int(coord / 100)
+        minutes = coord - (degrees * 100)
+        decimal = degrees + (minutes / 60.0)
+        if direction in ['S', 'W']:
+            decimal = -decimal
+        return decimal
+    except:
+        return None
+
+def parse_gprmc(sentence):
+    """Parse $GPRMC sentence."""
+    try:
+        parts = sentence.split(',')
+        if len(parts) < 8 or parts[2] != 'A':
+            return None
+        
+        lat = parse_nmea_coordinate(parts[3], parts[4])
+        lon = parse_nmea_coordinate(parts[5], parts[6])
+        
+        if lat and lon:
+            return {'lat': lat, 'lon': lon, 'valid': True}
+    except:
+        pass
+    return None
+
+def parse_gpgga(sentence):
+    """Parse $GPGGA sentence."""
+    try:
+        parts = sentence.split(',')
+        if len(parts) < 10 or int(parts[6] or 0) == 0:
+            return None
+        
+        lat = parse_nmea_coordinate(parts[2], parts[3])
+        lon = parse_nmea_coordinate(parts[4], parts[5])
+        
+        if lat and lon:
+            return {'lat': lat, 'lon': lon, 'valid': True}
+    except:
+        pass
+    return None
+
+def haversine_distance(lat1, lon1, lat2, lon2):
+    """Calculate distance between two GPS points in meters."""
+    R = 6371000
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    delta_phi = math.radians(lat2 - lat1)
+    delta_lambda = math.radians(lon2 - lon1)
+    
+    a = math.sin(delta_phi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(delta_lambda/2)**2
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+
+def calculate_bearing(lat1, lon1, lat2, lon2):
+    """Calculate bearing from point 1 to point 2 (0-360, 0=North)."""
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    delta_lambda = math.radians(lon2 - lon1)
+    
+    x = math.sin(delta_lambda) * math.cos(phi2)
+    y = math.cos(phi1)*math.sin(phi2) - math.sin(phi1)*math.cos(phi2)*math.cos(delta_lambda)
+    
+    bearing = math.degrees(math.atan2(x, y))
+    return (bearing + 360) % 360
+
+def bearing_to_turn(current_heading, target_bearing):
+    """Determine turn direction to reach target bearing."""
+    diff = (target_bearing - current_heading + 360) % 360
+    
+    if diff < HEADING_TOLERANCE or diff > (360 - HEADING_TOLERANCE):
+        return 'straight', diff
+    elif diff <= 180:
+        return 'right', diff
+    else:
+        return 'left', 360 - diff
 
 # ===================== CAMERA FUNCTIONS ===================== #
 
 def calculate_focal_length(known_dist, known_width, width_pix):
-    """Calculate camera focal length from calibration values"""
     return (width_pix * known_dist) / known_width
 
 def distance_to_camera(known_width, focal_length, pixel_width):
-    """Estimate distance to object based on its pixel width"""
-    if pixel_width == 0: 
+    if pixel_width == 0:
         return float('inf')
     return (known_width * focal_length) / pixel_width
 
 def analyze_path_clearance(edges, width, height):
-    """
-    Analyze left and right portions of the frame to determine
-    which direction has fewer obstacles (path of least resistance).
-    
-    Returns: 'left', 'right', or 'equal'
-    """
-    # Split frame into left and right halves
+    """Analyze which side has fewer obstacles."""
     mid = width // 2
-    left_region = edges[:, :mid]
-    right_region = edges[:, mid:]
+    left_edges = np.sum(edges[:, :mid] > 0)
+    right_edges = np.sum(edges[:, mid:] > 0)
     
-    # Count edge pixels in each region (more edges = more obstacles)
-    left_edges = np.sum(left_region > 0)
-    right_edges = np.sum(right_region > 0)
-    
-    # Add a threshold to avoid jitter when counts are similar
-    threshold = 0.1  # 10% difference required
     total = left_edges + right_edges
-    
     if total == 0:
         return 'equal', left_edges, right_edges
     
     diff_ratio = abs(left_edges - right_edges) / total
     
-    if diff_ratio < threshold:
+    if diff_ratio < 0.1:
         return 'equal', left_edges, right_edges
     elif left_edges < right_edges:
-        return 'left', left_edges, right_edges  # Left has fewer obstacles
+        return 'left', left_edges, right_edges
     else:
-        return 'right', left_edges, right_edges  # Right has fewer obstacles
-
+        return 'right', left_edges, right_edges
 
 # ===================== MAIN CONTROLLER ===================== #
 
 class RCCarController:
     def __init__(self):
-        # Shared data
-        self.closest_face_distance = None
-        self.closest_face_x = None
-        self.face_frame_width = None
-        
-        # Obstacle detection data
+        # Camera data
+        self.face_distance = None
+        self.face_position = None
         self.obstacle_detected = False
-        self.obstacle_position = "center"  # "left", "center", "right"
-        self.obstacle_distance_estimate = 100.0  # 0-100 scale (lower = closer)
+        self.obstacle_distance = 100.0
+        self.clearer_path = "equal"
         
-        # Path clearance data (NEW)
-        self.clearer_path = "equal"  # "left", "right", or "equal"
-        self.left_clearance = 0
-        self.right_clearance = 0
+        # GPS data
+        self.goal_lat = None
+        self.goal_lon = None
+        self.goal_distance = None
+        self.goal_bearing = None
+        self.robot_lat = ROBOT_START_LAT
+        self.robot_lon = ROBOT_START_LON
+        self.robot_heading = 0.0  # Assume facing North initially
         
         self.running = True
+        self.current_mode = "STARTING"
         
-        # Locks & Communication
+        # Locks
         self.data_lock = threading.Lock()
-        self.arduino = None
         
-        # Components
+        # Hardware
+        self.arduino = None
         self.picam2 = None
         self.face_cascade = None
         self.focal_length = None
-        self.current_mode = "STARTING"
+        self.gps_socket = None
         
-        # Command Mapping (Python String -> Arduino Char)
         self.CMD_MAP = {
             "forward": b'F',
             "backward": b'B',
@@ -126,26 +214,23 @@ class RCCarController:
             "stop": b'S',
         }
 
-    def initialize_components(self):
-        print("[INIT] Initializing components...")
+    def initialize(self):
+        print("[INIT] Starting initialization...")
         
-        # 1. Connect to Arduino via USB
+        # Arduino
         try:
             self.arduino = serial.Serial(ARDUINO_PORT, ARDUINO_BAUDRATE, timeout=1)
-            time.sleep(2)  # CRITICAL: Wait for Arduino to reboot after USB connection
-            print(f"[INIT] ✓ Arduino connected on {ARDUINO_PORT}")
+            time.sleep(2)
+            print(f"[INIT] ✓ Arduino on {ARDUINO_PORT}")
         except Exception as e:
-            print(f"[ERROR] Arduino connection failed: {e}")
-            print("  -> Is the USB cable plugged in?")
-            print("  -> Did you upload the Arduino code?")
+            print(f"[INIT] ✗ Arduino failed: {e}")
             return False
-
-        # 2. Camera
+        
+        # Camera
         try:
             self.face_cascade = cv2.CascadeClassifier('haarcascade_frontalface_default.xml')
             if self.face_cascade.empty():
-                print("[WARN] Haar cascade XML file missing - face detection disabled")
-                print("  -> Download from: https://github.com/opencv/opencv/tree/master/data/haarcascades")
+                print("[INIT] ⚠ Haar cascade not found")
                 self.face_cascade = None
             
             self.picam2 = Picamera2()
@@ -154,28 +239,48 @@ class RCCarController:
             )
             self.picam2.configure(config)
             self.picam2.start()
-            time.sleep(1)  # Let camera warm up
+            time.sleep(1)
             
             self.focal_length = calculate_focal_length(
                 CALIBRATION_DISTANCE_CM, FACE_WIDTH_CM, CALIBRATION_PIX_WIDTH
             )
-            print("[INIT] ✓ Camera initialized")
+            print("[INIT] ✓ Camera ready")
         except Exception as e:
-            print(f"[ERROR] Camera failed: {e}")
+            print(f"[INIT] ✗ Camera failed: {e}")
             return False
         
-        print("[INIT] ✓ All components ready!")
+        # GPS
+        if GPS_ENABLED:
+            try:
+                self.gps_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                self.gps_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                self.gps_socket.bind((GPS_UDP_IP, GPS_UDP_PORT))
+                self.gps_socket.settimeout(GPS_TIMEOUT)
+                print(f"[INIT] ✓ GPS listening on port {GPS_UDP_PORT}")
+            except Exception as e:
+                print(f"[INIT] ⚠ GPS failed: {e} - running without GPS")
+                self.gps_socket = None
+        else:
+            print("[INIT] GPS disabled")
+        
+        print("[INIT] ✓ All systems ready!")
         return True
 
-    # --- CAMERA THREAD ---
+    def get_best_turn(self, obstacle_pos, clearer_path):
+        """Get best turn direction using path of least resistance."""
+        if clearer_path == 'left':
+            return 'left'
+        elif clearer_path == 'right':
+            return 'right'
+        
+        if obstacle_pos == 'left':
+            return 'right'
+        elif obstacle_pos == 'right':
+            return 'left'
+        
+        return 'right'
 
     def camera_thread(self):
-        """
-        Camera thread that detects:
-        1. Faces (using Haar cascade) - for distance estimation
-        2. General obstacles (using edge detection + contours)
-        3. Path clearance (which side has fewer obstacles)
-        """
         print("[CAM] Thread started")
         
         while self.running:
@@ -192,300 +297,239 @@ class RCCarController:
                 frame_area = height * width
                 gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
                 
-                # --- Face Detection ---
+                # Face detection
                 face_dist = None
-                face_x = None
+                face_pos = None
                 
                 if self.face_cascade is not None:
                     faces = self.face_cascade.detectMultiScale(
-                        gray, 
-                        scaleFactor=1.05, 
-                        minNeighbors=4, 
-                        minSize=(30, 30)
+                        gray, scaleFactor=1.05, minNeighbors=4, minSize=(30, 30)
                     )
                     
                     if len(faces) > 0:
-                        # Sort faces by width (largest = closest)
                         faces = sorted(faces, key=lambda x: x[2], reverse=True)
                         x, y, w, h = faces[0]
                         face_dist = distance_to_camera(FACE_WIDTH_CM, self.focal_length, w)
                         face_x = x + w // 2
+                        
+                        if face_x < width // 3:
+                            face_pos = 'left'
+                        elif face_x > 2 * width // 3:
+                            face_pos = 'right'
+                        else:
+                            face_pos = 'center'
                 
-                # --- General Obstacle Detection (Edge + Contour) ---
-                obstacle_detected = False
-                obstacle_position = "center"
-                obstacle_distance = 100.0
-                
-                # Apply Gaussian blur and edge detection
+                # Edge detection for obstacles
                 blurred = cv2.GaussianBlur(gray, (5, 5), 0)
                 edges = cv2.Canny(blurred, 50, 150)
+                roi = edges[height//3:, :]
                 
-                # Focus on lower 2/3 of frame (ground-level obstacles)
-                roi_top = height // 3
-                roi = edges[roi_top:, :]
+                clearer_path, _, _ = analyze_path_clearance(roi, width, height - height//3)
                 
-                # --- Analyze path clearance (which side is clearer) ---
-                clearer_path, left_edges, right_edges = analyze_path_clearance(
-                    roi, width, height - roi_top
-                )
+                # Obstacle detection
+                obstacle_detected = False
+                obstacle_dist = 100.0
                 
-                # Find contours
-                contours, _ = cv2.findContours(
-                    roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-                )
+                if face_dist is None:
+                    contours, _ = cv2.findContours(roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    for contour in contours:
+                        area = cv2.contourArea(contour)
+                        area_ratio = area / frame_area
+                        if area_ratio > OBSTACLE_AREA_THRESHOLD:
+                            obstacle_detected = True
+                            obstacle_dist = max(0, 100 - (area_ratio * 500))
+                            break
                 
-                # Find significant contours
-                significant_contours = []
-                for contour in contours:
-                    area = cv2.contourArea(contour)
-                    area_ratio = area / frame_area
-                    if area_ratio > OBSTACLE_AREA_THRESHOLD:
-                        significant_contours.append((contour, area_ratio))
-                
-                if significant_contours:
-                    # Find the largest obstacle
-                    largest = max(significant_contours, key=lambda x: x[1])
-                    contour, area_ratio = largest
-                    
-                    # Get bounding box to determine position
-                    x, y, w, h = cv2.boundingRect(contour)
-                    center_x = x + w // 2
-                    
-                    # Determine position
-                    if center_x < width // 3:
-                        obstacle_position = "left"
-                    elif center_x > 2 * width // 3:
-                        obstacle_position = "right"
-                    else:
-                        obstacle_position = "center"
-                    
-                    # Estimate distance (inverse of area ratio)
-                    obstacle_distance = max(0, 100 - (area_ratio * 500))
-                    obstacle_detected = True
-                
-                # --- Update shared state ---
                 with self.data_lock:
-                    self.closest_face_distance = face_dist
-                    self.closest_face_x = face_x
-                    self.face_frame_width = width
-                    
+                    self.face_distance = face_dist
+                    self.face_position = face_pos
                     self.obstacle_detected = obstacle_detected
-                    self.obstacle_position = obstacle_position
-                    self.obstacle_distance_estimate = obstacle_distance
-                    
+                    self.obstacle_distance = obstacle_dist
                     self.clearer_path = clearer_path
-                    self.left_clearance = left_edges
-                    self.right_clearance = right_edges
                 
-                time.sleep(0.05)  # ~20 FPS
+                time.sleep(0.05)
                 
             except Exception as e:
-                print(f"[CAM ERR] {e}")
+                print(f"[CAM] Error: {e}")
                 time.sleep(0.5)
         
         print("[CAM] Thread stopped")
 
-    # --- MOTOR CONTROL THREAD ---
+    def gps_thread(self):
+        if self.gps_socket is None:
+            print("[GPS] No socket - thread exiting")
+            return
+        
+        print("[GPS] Thread started - waiting for phone location...")
+        
+        while self.running:
+            try:
+                data, addr = self.gps_socket.recvfrom(1024)
+                line = data.decode('utf-8').strip()
+                
+                result = None
+                if '$GPRMC' in line or '$GNRMC' in line:
+                    result = parse_gprmc(line)
+                elif '$GPGGA' in line or '$GNGGA' in line:
+                    result = parse_gpgga(line)
+                
+                if result:
+                    goal_lat = result['lat']
+                    goal_lon = result['lon']
+                    
+                    distance = haversine_distance(
+                        self.robot_lat, self.robot_lon, goal_lat, goal_lon
+                    )
+                    bearing = calculate_bearing(
+                        self.robot_lat, self.robot_lon, goal_lat, goal_lon
+                    )
+                    
+                    with self.data_lock:
+                        self.goal_lat = goal_lat
+                        self.goal_lon = goal_lon
+                        self.goal_distance = distance
+                        self.goal_bearing = bearing
+                    
+            except socket.timeout:
+                continue
+            except Exception as e:
+                print(f"[GPS] Error: {e}")
+                time.sleep(1)
+        
+        print("[GPS] Thread stopped")
 
-    def get_best_turn_direction(self, obstacle_pos, clearer_path):
-        """
-        Determine the best direction to turn based on:
-        1. Where the obstacle is
-        2. Which path is clearer
-        
-        Returns: 'left' or 'right'
-        """
-        # If one path is clearly better, use it
-        if clearer_path == 'left':
-            return 'left'
-        elif clearer_path == 'right':
-            return 'right'
-        
-        # If paths are equal, turn away from obstacle
-        if obstacle_pos == 'left':
-            return 'right'
-        elif obstacle_pos == 'right':
-            return 'left'
-        
-        # Default: turn right (arbitrary choice for center obstacles with equal paths)
-        return 'right'
-
-    def motor_control_thread(self):
-        """
-        Motor control thread with obstacle avoidance logic.
-        Uses path of least resistance to determine turn direction.
-        
-        Priority:
-        1. Face detected close -> STOP (safety for people)
-        2. Face/Obstacle detected -> Turn toward clearer path
-        3. Path clear -> FORWARD
-        """
+    def motor_thread(self):
         print("[MOTOR] Thread started")
         last_command = None
         avoiding_since = None
-
+        
         while self.running:
             with self.data_lock:
-                face_dist = self.closest_face_distance
-                face_x = self.closest_face_x
-                frame_width = self.face_frame_width
-                
+                face_dist = self.face_distance
+                face_pos = self.face_position
                 obstacle = self.obstacle_detected
-                obstacle_pos = self.obstacle_position
-                obstacle_dist = self.obstacle_distance_estimate
+                obstacle_dist = self.obstacle_distance
+                clearer = self.clearer_path
+                goal_dist = self.goal_distance
+                goal_bearing = self.goal_bearing
+            
+            command = "forward"
+            
+            # PRIORITY 1: Face too close - STOP
+            if face_dist is not None and face_dist < DANGER_DISTANCE:
+                self.current_mode = "STOPPED_FACE"
+                command = "stop"
+                avoiding_since = None
+            
+            # PRIORITY 2: Face or obstacle - AVOID
+            elif (face_dist is not None and face_dist < SAFE_DISTANCE) or \
+                 (obstacle and obstacle_dist < 30):
+                self.current_mode = "AVOIDING"
                 
-                clearer_path = self.clearer_path
-                left_clear = self.left_clearance
-                right_clear = self.right_clearance
-
-            command = "forward"  # Default: move forward
-            
-            # Determine obstacle position from face if detected
-            if face_dist is not None and frame_width:
-                if face_x < frame_width // 3:
-                    face_position = "left"
-                elif face_x > 2 * frame_width // 3:
-                    face_position = "right"
-                else:
-                    face_position = "center"
-            else:
-                face_position = None
-            
-            # === PRIORITY 1: Face Detection (Safety) ===
-            if face_dist is not None:
-                if face_dist < DANGER_DISTANCE:
-                    # Person too close - STOP
-                    self.current_mode = "STOPPED_FACE"
-                    command = "stop"
-                    print(f"[MOTOR] Face at {face_dist:.1f}cm - STOPPING")
-                    
-                elif face_dist < SAFE_DISTANCE:
-                    # Person in view - turn toward clearer path
-                    self.current_mode = "AVOIDING_FACE"
-                    turn_dir = self.get_best_turn_direction(face_position, clearer_path)
+                if avoiding_since is None:
+                    avoiding_since = time.time()
+                
+                if time.time() - avoiding_since < TURN_DURATION * 2:
+                    turn_dir = self.get_best_turn(face_pos or 'center', clearer)
                     command = turn_dir
-                    print(f"[MOTOR] Face at {face_dist:.1f}cm ({face_position}), "
-                          f"clearer={clearer_path} -> turning {turn_dir.upper()}")
-            
-            # === PRIORITY 2: Obstacle Avoidance ===
-            elif obstacle:
-                if obstacle_dist < 30:
-                    # Obstacle very close - stop and turn toward clearer path
-                    self.current_mode = "AVOIDING_OBSTACLE"
-                    
-                    if avoiding_since is None:
-                        avoiding_since = time.time()
-                        command = "stop"
-                        print(f"[MOTOR] Obstacle at {obstacle_pos}! Stopping...")
-                    
-                    elif time.time() - avoiding_since < TURN_DURATION * 2:
-                        # Turn toward clearer path
-                        turn_dir = self.get_best_turn_direction(obstacle_pos, clearer_path)
-                        command = turn_dir
-                        print(f"[MOTOR] Obstacle at {obstacle_pos}, clearer={clearer_path} "
-                              f"-> turning {turn_dir.upper()}")
-                    
-                    else:
-                        # Been avoiding too long, try backing up
-                        if time.time() - avoiding_since < TURN_DURATION * 4:
-                            command = "backward"
-                            print("[MOTOR] Backing up...")
-                        else:
-                            avoiding_since = None  # Reset and try again
-                
-                elif obstacle_dist < 60:
-                    # Obstacle approaching - cautious forward
-                    self.current_mode = "CAUTIOUS"
-                    avoiding_since = None
-                    command = "forward"
-                    print(f"[MOTOR] Obstacle ahead ({obstacle_dist:.0f}) - cautious forward")
-                
+                elif time.time() - avoiding_since < TURN_DURATION * 4:
+                    command = "backward"
                 else:
-                    # Obstacle detected but far away
                     avoiding_since = None
-                    command = "forward"
             
-            # === PRIORITY 3: Path Clear ===
+            # PRIORITY 3: Navigate to GPS goal
+            elif goal_dist is not None and goal_bearing is not None:
+                avoiding_since = None
+                
+                if goal_dist < WAYPOINT_REACHED_DISTANCE:
+                    self.current_mode = "GOAL_REACHED"
+                    command = "stop"
+                else:
+                    turn_dir, turn_angle = bearing_to_turn(self.robot_heading, goal_bearing)
+                    
+                    if turn_dir == 'straight' or turn_angle < HEADING_TOLERANCE:
+                        self.current_mode = "NAVIGATING"
+                        command = "forward"
+                    else:
+                        self.current_mode = "TURNING"
+                        command = turn_dir
+            
+            # PRIORITY 4: No GPS - cautious forward
+            elif obstacle and obstacle_dist < 60:
+                self.current_mode = "CAUTIOUS"
+                avoiding_since = None
+                command = "forward"
+            
+            # PRIORITY 5: Clear path
             else:
                 self.current_mode = "FORWARD"
                 avoiding_since = None
                 command = "forward"
-
-            # Send command only if it changed
+            
             if command != last_command:
-                self.send_to_arduino(command)
+                self.send_command(command)
                 last_command = command
             
-            # Adjust sleep based on mode
-            if self.current_mode == "CAUTIOUS":
-                time.sleep(0.15)
-            else:
-                time.sleep(0.1)
-
-        # Ensure motors stop on exit
-        self.send_to_arduino("stop")
+            time.sleep(0.1)
+        
+        self.send_command("stop")
         print("[MOTOR] Thread stopped")
 
-    def send_to_arduino(self, command_str):
-        """Maps string command to byte character and sends via USB"""
-        if self.arduino and self.arduino.is_open:
-            if command_str in self.CMD_MAP:
-                byte_cmd = self.CMD_MAP[command_str]
-                self.arduino.write(byte_cmd)
-                print(f"[ARDUINO] Sent: {command_str.upper()} -> {byte_cmd}")
-            else:
-                print(f"[ARDUINO] Unknown command: {command_str}")
+    def send_command(self, cmd_str):
+        if self.arduino and self.arduino.is_open and cmd_str in self.CMD_MAP:
+            self.arduino.write(self.CMD_MAP[cmd_str])
+            print(f"[MOTOR] {cmd_str.upper()} | Mode: {self.current_mode}")
 
     def status_thread(self):
-        """Periodic status updates"""
         print("[STATUS] Thread started")
+        
         while self.running:
             with self.data_lock:
-                face_dist = self.closest_face_distance
+                face_dist = self.face_distance
                 obstacle = self.obstacle_detected
-                obstacle_pos = self.obstacle_position
-                obstacle_dist = self.obstacle_distance_estimate
+                obstacle_dist = self.obstacle_distance
                 clearer = self.clearer_path
-                left_c = self.left_clearance
-                right_c = self.right_clearance
+                goal_dist = self.goal_distance
+                goal_bearing = self.goal_bearing
             
-            status_parts = [f"Mode: {self.current_mode}"]
+            parts = [f"Mode: {self.current_mode}"]
             
             if face_dist:
-                status_parts.append(f"Face: {face_dist:.1f}cm")
-            
+                parts.append(f"Face: {face_dist:.1f}cm")
             if obstacle:
-                status_parts.append(f"Obstacle: {obstacle_pos} ({obstacle_dist:.0f})")
+                parts.append(f"Obstacle: {obstacle_dist:.0f}")
+            if goal_dist:
+                parts.append(f"Goal: {goal_dist:.1f}m @ {goal_bearing:.0f}°")
             
-            status_parts.append(f"Clearer: {clearer} (L:{left_c} R:{right_c})")
+            parts.append(f"Clearer: {clearer}")
             
-            print(f"[STATUS] {' | '.join(status_parts)}")
+            print(f"[STATUS] {' | '.join(parts)}")
             time.sleep(2)
         
         print("[STATUS] Thread stopped")
 
     def start(self):
-        """Initialize and start all threads"""
-        if not self.initialize_components():
-            print("[ERROR] Initialization failed - exiting")
+        if not self.initialize():
+            print("[ERROR] Initialization failed")
             return
         
-        # Create threads
         threads = [
             threading.Thread(target=self.camera_thread, daemon=True, name="Camera"),
-            threading.Thread(target=self.motor_control_thread, daemon=True, name="Motor"),
+            threading.Thread(target=self.motor_thread, daemon=True, name="Motor"),
             threading.Thread(target=self.status_thread, daemon=True, name="Status"),
         ]
         
-        # Start all threads
+        if GPS_ENABLED and self.gps_socket:
+            threads.append(threading.Thread(target=self.gps_thread, daemon=True, name="GPS"))
+        
         for t in threads:
             t.start()
         
         print("\n" + "="*50)
-        print("=== RC CAR OBSTACLE AVOIDANCE RUNNING ===")
+        print("RC CAR - GPS NAVIGATION + OBSTACLE AVOIDANCE")
         print("="*50)
-        print("Modes: FORWARD | CAUTIOUS | AVOIDING | STOPPED")
-        print("Turn logic: Path of least resistance")
+        print(f"GPS: {'Enabled' if GPS_ENABLED else 'Disabled'}")
+        print(f"Robot position: {self.robot_lat:.6f}, {self.robot_lon:.6f}")
         print("Press Ctrl+C to stop")
         print("="*50 + "\n")
         
@@ -493,25 +537,24 @@ class RCCarController:
             while True:
                 time.sleep(1)
         except KeyboardInterrupt:
-            print("\n[MAIN] Shutdown requested...")
+            print("\n[MAIN] Shutting down...")
             self.stop()
 
     def stop(self):
-        """Clean shutdown"""
-        print("[MAIN] Stopping all threads...")
         self.running = False
         time.sleep(0.5)
         
         if self.arduino:
-            self.arduino.write(b'S')  # Ensure stop
+            self.arduino.write(b'S')
             self.arduino.close()
-            print("[MAIN] Arduino disconnected")
         
         if self.picam2:
             self.picam2.stop()
-            print("[MAIN] Camera stopped")
         
-        print("[MAIN] System stopped.")
+        if self.gps_socket:
+            self.gps_socket.close()
+        
+        print("[MAIN] Stopped")
 
 
 if __name__ == "__main__":
