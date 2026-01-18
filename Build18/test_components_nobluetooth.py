@@ -29,7 +29,7 @@ CALIBRATION_PIX_WIDTH = 140
 
 # ARDUINO CONNECTION Config
 ARDUINO_PORT = '/dev/ttyACM0'  
-ARDUINO_BAUDRATE = 9600
+ARDUINO_BAUDRATE = 9600  # Must match Arduino Serial.begin(9600)
 
 # Decision Thresholds
 DANGER_DISTANCE = 40.0
@@ -163,17 +163,36 @@ def test_camera():
         )
         print(f"  Calculated focal length: {focal_length:.2f}")
         
-        # Initialize camera
-        print("\nInitializing camera...")
-        picam2 = Picamera2()
-        config = picam2.create_video_configuration(
-            main={"format": "RGB888", "size": (640, 480)}
-        )
-        picam2.configure(config)
-        picam2.start()
-        time.sleep(1)
+        # Try to release camera if it's busy
+        release_camera()
         
-        print("✓ Camera initialized!")
+        # Initialize camera with retry
+        print("\nInitializing camera...")
+        picam2 = None
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                picam2 = Picamera2()
+                config = picam2.create_video_configuration(
+                    main={"format": "RGB888", "size": (640, 480)}
+                )
+                picam2.configure(config)
+                picam2.start()
+                time.sleep(1)
+                print("✓ Camera initialized!")
+                break
+            except RuntimeError as e:
+                if attempt < max_retries - 1:
+                    print(f"  Camera busy, retrying ({attempt + 1}/{max_retries})...")
+                    release_camera()
+                    time.sleep(2)
+                else:
+                    raise RuntimeError(
+                        "Camera is busy. Try running:\n"
+                        "  sudo pkill -f libcamera\n"
+                        "  sudo pkill -f python3\n"
+                        "Or reboot: sudo reboot"
+                    ) from e
         print("\nProcessing 50 frames (5 seconds)...")
         print("Move objects/hands/face in front of camera")
         print("-" * 40)
@@ -246,6 +265,10 @@ def test_camera():
             time.sleep(0.1)
         
         picam2.stop()
+        try:
+            picam2.close()
+        except:
+            pass
         
         print("-" * 40)
         print("\nDetection Summary:")
@@ -264,6 +287,15 @@ def test_camera():
         print(f"✗ Camera error: {e}")
         import traceback
         traceback.print_exc()
+        
+        # Try to release camera on error
+        try:
+            if picam2:
+                picam2.stop()
+                picam2.close()
+        except:
+            pass
+        
         return False
 
 
@@ -354,6 +386,16 @@ def test_threading():
         return False
 
 
+def release_camera():
+    """Helper function to release any existing camera instances"""
+    import subprocess
+    try:
+        # Kill any existing picamera/libcamera processes
+        subprocess.run(['sudo', 'pkill', '-f', 'libcamera'], capture_output=True)
+        time.sleep(0.5)
+    except:
+        pass
+
 def test_integrated():
     """Test camera and motor working together"""
     print("\n" + "="*60)
@@ -367,6 +409,9 @@ def test_integrated():
     if response != 'y':
         print("Test skipped")
         return None
+    
+    arduino = None
+    picam2 = None
     
     try:
         import serial
@@ -391,16 +436,36 @@ def test_integrated():
         
         time.sleep(2)
         
-        # Initialize camera
+        # Try to release camera if it's busy
+        print("Checking camera availability...")
+        release_camera()
+        
+        # Initialize camera with retry
         print("Initializing camera...")
-        picam2 = Picamera2()
-        config = picam2.create_video_configuration(
-            main={"format": "RGB888", "size": (640, 480)}
-        )
-        picam2.configure(config)
-        picam2.start()
-        time.sleep(1)
-        print("✓ Camera ready!")
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                picam2 = Picamera2()
+                config = picam2.create_video_configuration(
+                    main={"format": "RGB888", "size": (640, 480)}
+                )
+                picam2.configure(config)
+                picam2.start()
+                time.sleep(1)
+                print("✓ Camera ready!")
+                break
+            except RuntimeError as e:
+                if attempt < max_retries - 1:
+                    print(f"  Camera busy, retrying ({attempt + 1}/{max_retries})...")
+                    release_camera()
+                    time.sleep(2)
+                else:
+                    raise RuntimeError(
+                        "Camera is busy. Try running:\n"
+                        "  sudo pkill -f libcamera\n"
+                        "  sudo pkill -f python3\n"
+                        "Or reboot: sudo reboot"
+                    ) from e
         
         # Shared state (matching main script)
         data_lock = threading.Lock()
@@ -497,10 +562,21 @@ def test_integrated():
         shared_state['running'] = False
         time.sleep(0.5)
         
-        # Cleanup
-        arduino.write(b'S')
-        arduino.close()
-        picam2.stop()
+        # Cleanup - ensure resources are released
+        print("\nCleaning up...")
+        try:
+            arduino.write(b'S')
+            arduino.close()
+            print("  Arduino closed")
+        except:
+            pass
+        
+        try:
+            picam2.stop()
+            picam2.close()
+            print("  Camera released")
+        except:
+            pass
         
         print("-" * 40)
         print("✓ Integrated test complete!")
@@ -515,6 +591,21 @@ def test_integrated():
         print(f"✗ Error: {e}")
         import traceback
         traceback.print_exc()
+        
+        # Cleanup on error
+        if arduino:
+            try:
+                arduino.write(b'S')
+                arduino.close()
+            except:
+                pass
+        if picam2:
+            try:
+                picam2.stop()
+                picam2.close()
+            except:
+                pass
+        
         return False
 
 
