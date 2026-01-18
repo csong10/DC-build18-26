@@ -9,6 +9,53 @@ Run with: sudo python3 test_components.py
 import sys
 import time
 
+def test_arduino():
+    """Test USB Serial communication with Arduino"""
+    print("\n" + "="*60)
+    print("TESTING: Arduino USB Connection")
+    print("="*60)
+    print("Ensure Arduino is plugged into USB and code is uploaded!")
+    input("Press Enter to start test...")
+    
+    try:
+        import serial
+        # Standard USB Serial Port for Arduino
+        PORT = '/dev/ttyACM0' 
+        BAUD = 9600
+        
+        print(f"Connecting to {PORT}...")
+        arduino = serial.Serial(PORT, BAUD, timeout=1)
+        time.sleep(2) # Wait for auto-reset
+        print("✓ Connected!")
+        
+        commands = [
+            (b'F', "Forward"),
+            (b'B', "Backward"),
+            (b'L', "Left"),
+            (b'R', "Right"),
+            (b'S', "Stop")
+        ]
+        
+        print("\nSending test commands...")
+        for cmd_byte, desc in commands:
+            arduino.write(cmd_byte)
+            print(f"  Sent: {desc} ({cmd_byte})")
+            time.sleep(1.0) # Run each action for 1 second
+            
+        arduino.write(b'S') # Ensure stop at end
+        arduino.close()
+        print("\n✓ Arduino test complete")
+        return True
+        
+    except serial.SerialException as e:
+        print(f"✗ ERROR: Could not open {PORT}")
+        print("  1. Check USB cable")
+        print("  2. Try: ls /dev/tty* (look for ttyACM0 or ttyUSB0)")
+        return False
+    except ImportError:
+        print("✗ ERROR: pyserial not installed (pip3 install pyserial)")
+        return False
+
 def test_bluetooth():
     """Test Bluetooth beacon scanning"""
     print("\n" + "="*60)
@@ -112,51 +159,6 @@ def test_camera():
         print(f"✗ ERROR: {e}")
         return False
 
-def test_uart():
-    """Test UART communication"""
-    print("\n" + "="*60)
-    print("TESTING: UART Communication")
-    print("="*60)
-    print("Make sure your STM32 is connected and powered on")
-    print("This will send test commands over UART")
-    input("Press Enter to start test...")
-    
-    try:
-        import serial
-        
-        UART_PORT = '/dev/ttyAMA0'
-        UART_BAUDRATE = 115200
-        
-        uart = serial.Serial(UART_PORT, UART_BAUDRATE, timeout=1)
-        print(f"✓ UART opened on {UART_PORT} at {UART_BAUDRATE} baud")
-        
-        commands = ["forward", "backward", "left", "right", "stop"]
-        
-        print("\nSending test commands...")
-        for cmd in commands:
-            message = f"{cmd}\n"
-            uart.write(message.encode('utf-8'))
-            print(f"  Sent: {cmd}")
-            time.sleep(1)
-        
-        uart.close()
-        print("\n✓ UART test complete")
-        print("  Check your STM32 serial monitor to verify commands were received")
-        return True
-        
-    except ImportError:
-        print("✗ ERROR: pyserial library not installed")
-        print("  Install with: pip3 install pyserial")
-        return False
-    except serial.SerialException as e:
-        print(f"✗ ERROR: Cannot open UART port: {e}")
-        print("  Make sure UART is enabled in /boot/config.txt")
-        print("  Check wiring: Pi TX → STM32 RX, Pi RX → STM32 TX, GND → GND")
-        return False
-    except Exception as e:
-        print(f"✗ ERROR: {e}")
-        return False
-
 def test_threading():
     """Test basic threading functionality"""
     print("\n" + "="*60)
@@ -230,7 +232,7 @@ def main():
     elif choice == '2':
         results['camera'] = test_camera()
     elif choice == '3':
-        results['uart'] = test_uart()
+        results['uart'] = test_arduino()
     elif choice == '4':
         results['threading'] = test_threading()
     elif choice == '5':
@@ -240,7 +242,7 @@ def main():
         results['threading'] = test_threading()
         results['bluetooth'] = test_bluetooth()
         results['camera'] = test_camera()
-        results['uart'] = test_uart()
+        results['uart'] = test_arduino()
     elif choice == '0':
         print("Exiting...")
         return
