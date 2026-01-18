@@ -16,6 +16,7 @@ Tests included:
 6. GPS Receiver (iPhone GPS2IP)
 7. GPS Navigation Test
 8. Integrated Camera + Motor + GPS
+9. Monitor Phone GPS (Continuous)
 """
 
 import sys
@@ -596,6 +597,41 @@ def test_gps_receiver():
         print("  5. Try: sudo ufw allow 11123/udp")
         return False
 
+def monitor_phone_gps():
+    """
+    Continuously monitor and display phone GPS location.
+    Loops until interrupted to allow verification of signal reception.
+    """
+    print("\n" + "="*60)
+    print("MONITORING: Phone GPS Location (Continuous)")
+    print("="*60)
+    print("Ensure GPS2IP is running on your phone.")
+    print("Press Ctrl+C to stop monitoring.")
+    
+    gps = GPSReceiver()
+    if not gps.connect():
+        return False
+    
+    print(f"\nListening on port {GPS_UDP_PORT}...")
+    print("Walk around with your phone to see coordinates update.\n")
+    
+    try:
+        while True:
+            pos = gps.get_position(timeout=2)
+            if pos:
+                # Use carriage return \r to overwrite the line for a clean display
+                speed = pos.get('speed_ms', 0)
+                print(f"\r[PHONE] Lat: {pos['lat']:.6f} | Lon: {pos['lon']:.6f} | Spd: {speed:.1f}m/s   ", end="", flush=True)
+            else:
+                print(f"\r[PHONE] Waiting for signal...                                     ", end="", flush=True)
+            
+            time.sleep(0.2)
+            
+    except KeyboardInterrupt:
+        print("\n\nStopped monitoring.")
+    finally:
+        gps.close()
+    return True
 
 def test_gps_navigation():
     """Test GPS navigation calculations."""
@@ -1128,7 +1164,7 @@ def main():
         print("  6. GPS Receiver (iPhone GPS2IP)")
         print("  7. GPS Navigation Calculations")
         print("  8. Integrated Camera + Motor + GPS")
-        print("  9. Run ALL tests")
+        print("  9. Monitor Phone GPS (Continuous)")
         print("  0. Exit")
         
         choice = input("\nChoice: ").strip()
@@ -1160,16 +1196,7 @@ def main():
             if r is not None:
                 results['integrated_gps'] = r
         elif choice == '9':
-            results['threading'] = test_threading()
-            results['path_clearance'] = test_path_clearance()
-            results['camera'] = test_camera()
-            results['arduino'] = test_arduino()
-            r = test_gps_receiver()
-            if r is not None:
-                results['gps_receiver'] = r
-            r = test_motor_sequence()
-            if r is not None:
-                results['motor_sequence'] = r
+            monitor_phone_gps()
         elif choice == '0':
             print("\nGoodbye!")
             break
