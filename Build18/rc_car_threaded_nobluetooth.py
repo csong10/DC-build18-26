@@ -7,6 +7,7 @@ This script controls an RC car using:
 - Camera vision for obstacle detection (faces + general obstacles)
 - Motor control via Arduino USB Serial
 - Threaded architecture for concurrent processing
+- Path of least resistance turning logic
 
 Based on original rc_car_threaded.py with Bluetooth removed.
 
@@ -27,20 +28,18 @@ FACE_WIDTH_CM = 14.0
 CALIBRATION_DISTANCE_CM = 50.0
 CALIBRATION_PIX_WIDTH = 140
 
-# ARDUINO CONNECTION Config (preserved from original)
+# ARDUINO CONNECTION Config
 ARDUINO_PORT = '/dev/ttyACM0'  
-ARDUINO_BAUDRATE = 115200        
+ARDUINO_BAUDRATE = 9600  # Must match Arduino Serial.begin(9600)        
 
 # Decision Thresholds (preserved from original)
 DANGER_DISTANCE = 40.0        # Stop if obstacle closer than this (cm)
 SAFE_DISTANCE = 100.0         # Slow down / be cautious under this distance
 
-# Obstacle Avoidance Config (NEW)
+# Obstacle Avoidance Config
 OBSTACLE_AREA_THRESHOLD = 0.08    # Minimum contour area ratio to detect as obstacle (8% of frame)
 OBSTACLE_CLOSE_THRESHOLD = 0.15   # Contour area ratio indicating obstacle is very close (15%)
-FORWARD_DURATION = 2.0            # How long to move forward before checking (seconds)
 TURN_DURATION = 0.5               # How long to turn when avoiding (seconds)
-SEARCH_TURN_DURATION = 0.3        # How long to turn when searching for path
 
 # ===================== CAMERA FUNCTIONS ===================== #
 
@@ -54,6 +53,39 @@ def distance_to_camera(known_width, focal_length, pixel_width):
         return float('inf')
     return (known_width * focal_length) / pixel_width
 
+def analyze_path_clearance(edges, width, height):
+    """
+    Analyze left and right portions of the frame to determine
+    which direction has fewer obstacles (path of least resistance).
+    
+    Returns: 'left', 'right', or 'equal'
+    """
+    # Split frame into left and right halves
+    mid = width // 2
+    left_region = edges[:, :mid]
+    right_region = edges[:, mid:]
+    
+    # Count edge pixels in each region (more edges = more obstacles)
+    left_edges = np.sum(left_region > 0)
+    right_edges = np.sum(right_region > 0)
+    
+    # Add a threshold to avoid jitter when counts are similar
+    threshold = 0.1  # 10% difference required
+    total = left_edges + right_edges
+    
+    if total == 0:
+        return 'equal', left_edges, right_edges
+    
+    diff_ratio = abs(left_edges - right_edges) / total
+    
+    if diff_ratio < threshold:
+        return 'equal', left_edges, right_edges
+    elif left_edges < right_edges:
+        return 'left', left_edges, right_edges  # Left has fewer obstacles
+    else:
+        return 'right', left_edges, right_edges  # Right has fewer obstacles
+
+
 # ===================== MAIN CONTROLLER ===================== #
 
 class RCCarController:
@@ -63,10 +95,15 @@ class RCCarController:
         self.closest_face_x = None
         self.face_frame_width = None
         
-        # Obstacle detection data (NEW)
+        # Obstacle detection data
         self.obstacle_detected = False
         self.obstacle_position = "center"  # "left", "center", "right"
         self.obstacle_distance_estimate = 100.0  # 0-100 scale (lower = closer)
+        
+        # Path clearance data (NEW)
+        self.clearer_path = "equal"  # "left", "right", or "equal"
+        self.left_clearance = 0
+        self.right_clearance = 0
         
         self.running = True
         
@@ -137,6 +174,7 @@ class RCCarController:
         Camera thread that detects:
         1. Faces (using Haar cascade) - for distance estimation
         2. General obstacles (using edge detection + contours)
+        3. Path clearance (which side has fewer obstacles)
         """
         print("[CAM] Thread started")
         
@@ -186,6 +224,11 @@ class RCCarController:
                 roi_top = height // 3
                 roi = edges[roi_top:, :]
                 
+                # --- Analyze path clearance (which side is clearer) ---
+                clearer_path, left_edges, right_edges = analyze_path_clearance(
+                    roi, width, height - roi_top
+                )
+                
                 # Find contours
                 contours, _ = cv2.findContours(
                     roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
@@ -229,6 +272,10 @@ class RCCarController:
                     self.obstacle_detected = obstacle_detected
                     self.obstacle_position = obstacle_position
                     self.obstacle_distance_estimate = obstacle_distance
+                    
+                    self.clearer_path = clearer_path
+                    self.left_clearance = left_edges
+                    self.right_clearance = right_edges
                 
                 time.sleep(0.05)  # ~20 FPS
                 
@@ -240,13 +287,37 @@ class RCCarController:
 
     # --- MOTOR CONTROL THREAD ---
 
+    def get_best_turn_direction(self, obstacle_pos, clearer_path):
+        """
+        Determine the best direction to turn based on:
+        1. Where the obstacle is
+        2. Which path is clearer
+        
+        Returns: 'left' or 'right'
+        """
+        # If one path is clearly better, use it
+        if clearer_path == 'left':
+            return 'left'
+        elif clearer_path == 'right':
+            return 'right'
+        
+        # If paths are equal, turn away from obstacle
+        if obstacle_pos == 'left':
+            return 'right'
+        elif obstacle_pos == 'right':
+            return 'left'
+        
+        # Default: turn right (arbitrary choice for center obstacles with equal paths)
+        return 'right'
+
     def motor_control_thread(self):
         """
         Motor control thread with obstacle avoidance logic.
+        Uses path of least resistance to determine turn direction.
         
         Priority:
         1. Face detected close -> STOP (safety for people)
-        2. Obstacle detected -> AVOID (turn away)
+        2. Face/Obstacle detected -> Turn toward clearer path
         3. Path clear -> FORWARD
         """
         print("[MOTOR] Thread started")
@@ -262,8 +333,23 @@ class RCCarController:
                 obstacle = self.obstacle_detected
                 obstacle_pos = self.obstacle_position
                 obstacle_dist = self.obstacle_distance_estimate
+                
+                clearer_path = self.clearer_path
+                left_clear = self.left_clearance
+                right_clear = self.right_clearance
 
             command = "forward"  # Default: move forward
+            
+            # Determine obstacle position from face if detected
+            if face_dist is not None and frame_width:
+                if face_x < frame_width // 3:
+                    face_position = "left"
+                elif face_x > 2 * frame_width // 3:
+                    face_position = "right"
+                else:
+                    face_position = "center"
+            else:
+                face_position = None
             
             # === PRIORITY 1: Face Detection (Safety) ===
             if face_dist is not None:
@@ -271,25 +357,20 @@ class RCCarController:
                     # Person too close - STOP
                     self.current_mode = "STOPPED_FACE"
                     command = "stop"
-                    print(f"[MOTOR] Face detected at {face_dist:.1f}cm - STOPPING")
+                    print(f"[MOTOR] Face at {face_dist:.1f}cm - STOPPING")
                     
                 elif face_dist < SAFE_DISTANCE:
-                    # Person in view, not too close - turn away
+                    # Person in view - turn toward clearer path
                     self.current_mode = "AVOIDING_FACE"
-                    if frame_width and face_x:
-                        center = frame_width // 2
-                        if face_x > center:
-                            command = "left"   # Face on right, turn left
-                        else:
-                            command = "right"  # Face on left, turn right
-                    else:
-                        command = "right"  # Default turn
-                    print(f"[MOTOR] Face at {face_dist:.1f}cm, position={face_x} - turning {command}")
+                    turn_dir = self.get_best_turn_direction(face_position, clearer_path)
+                    command = turn_dir
+                    print(f"[MOTOR] Face at {face_dist:.1f}cm ({face_position}), "
+                          f"clearer={clearer_path} -> turning {turn_dir.upper()}")
             
             # === PRIORITY 2: Obstacle Avoidance ===
             elif obstacle:
                 if obstacle_dist < 30:
-                    # Obstacle very close - stop and turn
+                    # Obstacle very close - stop and turn toward clearer path
                     self.current_mode = "AVOIDING_OBSTACLE"
                     
                     if avoiding_since is None:
@@ -297,35 +378,23 @@ class RCCarController:
                         command = "stop"
                         print(f"[MOTOR] Obstacle at {obstacle_pos}! Stopping...")
                     
-                    elif time.time() - avoiding_since < TURN_DURATION:
-                        # Turn away from obstacle
-                        if obstacle_pos == "left":
-                            command = "right"
-                        elif obstacle_pos == "right":
-                            command = "left"
-                        else:
-                            command = "right"  # Center obstacle, default right
-                        print(f"[MOTOR] Turning {command} to avoid {obstacle_pos} obstacle")
-                    
                     elif time.time() - avoiding_since < TURN_DURATION * 2:
-                        # Continue turning
-                        if obstacle_pos == "left":
-                            command = "right"
-                        elif obstacle_pos == "right":
-                            command = "left"
-                        else:
-                            command = "right"
+                        # Turn toward clearer path
+                        turn_dir = self.get_best_turn_direction(obstacle_pos, clearer_path)
+                        command = turn_dir
+                        print(f"[MOTOR] Obstacle at {obstacle_pos}, clearer={clearer_path} "
+                              f"-> turning {turn_dir.upper()}")
                     
                     else:
                         # Been avoiding too long, try backing up
-                        if time.time() - avoiding_since < TURN_DURATION * 3:
+                        if time.time() - avoiding_since < TURN_DURATION * 4:
                             command = "backward"
                             print("[MOTOR] Backing up...")
                         else:
                             avoiding_since = None  # Reset and try again
                 
                 elif obstacle_dist < 60:
-                    # Obstacle approaching - slow down (shorter movements)
+                    # Obstacle approaching - cautious forward
                     self.current_mode = "CAUTIOUS"
                     avoiding_since = None
                     command = "forward"
@@ -349,7 +418,7 @@ class RCCarController:
             
             # Adjust sleep based on mode
             if self.current_mode == "CAUTIOUS":
-                time.sleep(0.15)  # Slower updates when being cautious
+                time.sleep(0.15)
             else:
                 time.sleep(0.1)
 
@@ -376,6 +445,9 @@ class RCCarController:
                 obstacle = self.obstacle_detected
                 obstacle_pos = self.obstacle_position
                 obstacle_dist = self.obstacle_distance_estimate
+                clearer = self.clearer_path
+                left_c = self.left_clearance
+                right_c = self.right_clearance
             
             status_parts = [f"Mode: {self.current_mode}"]
             
@@ -384,6 +456,8 @@ class RCCarController:
             
             if obstacle:
                 status_parts.append(f"Obstacle: {obstacle_pos} ({obstacle_dist:.0f})")
+            
+            status_parts.append(f"Clearer: {clearer} (L:{left_c} R:{right_c})")
             
             print(f"[STATUS] {' | '.join(status_parts)}")
             time.sleep(2)
@@ -411,6 +485,7 @@ class RCCarController:
         print("=== RC CAR OBSTACLE AVOIDANCE RUNNING ===")
         print("="*50)
         print("Modes: FORWARD | CAUTIOUS | AVOIDING | STOPPED")
+        print("Turn logic: Path of least resistance")
         print("Press Ctrl+C to stop")
         print("="*50 + "\n")
         
