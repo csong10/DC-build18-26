@@ -29,8 +29,8 @@ const int IN7 = 12;
 const int IN8 = 13;
 
 // --- SPEED SETTINGS (0-255) ---
-int speedFast = 200;
-int speedTurn = 160;
+int speedFast = 160;
+int speedTurn = 100;
 
 void setup() {
   Serial.begin(9600); // Communication with Raspberry Pi
@@ -63,33 +63,33 @@ void loop() {
 void moveForward() {
   // All 4 wheels spin forward
   setMotor(ENA, IN1, IN2, speedFast, true);  // Left Back
-  setMotor(ENB, IN3, IN4, speedFast, true);  // Left Front
-  setMotor(ENC, IN5, IN6, speedFast, true);  // Right Back
-  setMotor(END, IN7, IN8, speedFast, true);  // Right Front
+  setMotor(ENB, IN4, IN3, speedFast, true);  // Left Front
+  setMotor(ENC, IN6, IN5, speedFast, true);  // Right Back
+  setMotor(END, IN8, IN7, speedFast, true);  // Right Front
 }
 
 void moveBackward() {
   // All 4 wheels spin backward
   setMotor(ENA, IN1, IN2, speedFast, false);
   setMotor(ENB, IN3, IN4, speedFast, false);
-  setMotor(ENC, IN5, IN6, speedFast, false);
-  setMotor(END, IN7, IN8, speedFast, false);
+  setMotor(ENC, IN6, IN5, speedFast, false);
+  setMotor(END, IN8, IN7, speedFast, false);
 }
 
 void turnLeft() {
   // Skid Steer: Left wheels Back, Right wheels Forward
   setMotor(ENA, IN1, IN2, speedTurn, false); // Left Back Back
   setMotor(ENB, IN3, IN4, speedTurn, false); // Left Front Back
-  setMotor(ENC, IN5, IN6, speedTurn, true);  // Right Back Fwd
-  setMotor(END, IN7, IN8, speedTurn, true);  // Right Front Fwd
+  setMotor(ENC, IN6, IN5, speedTurn, true);  // Right Back Fwd
+  setMotor(END, IN8, IN7, speedTurn, true);  // Right Front Fwd
 }
 
 void turnRight() {
   // Skid Steer: Left wheels Forward, Right wheels Back
   setMotor(ENA, IN1, IN2, speedTurn, true);  // Left Back Fwd
   setMotor(ENB, IN3, IN4, speedTurn, true);  // Left Front Fwd
-  setMotor(ENC, IN5, IN6, speedTurn, false); // Right Back Back
-  setMotor(END, IN7, IN8, speedTurn, false); // Right Front Back
+  setMotor(ENC, IN6, IN5, speedTurn, false); // Right Back Back
+  setMotor(END, IN8, IN7, speedTurn, false); // Right Front Back
 }
 
 void stopMotors() {
