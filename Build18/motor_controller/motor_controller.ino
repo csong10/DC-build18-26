@@ -29,7 +29,7 @@ const int IN7 = 12;
 const int IN8 = 13;
 
 // --- SPEED SETTINGS (0-255) ---
-int speedFast = 160;
+int speedFast = 140;
 int speedTurn = 100;
 
 void setup() {
@@ -71,7 +71,7 @@ void moveForward() {
 void moveBackward() {
   // All 4 wheels spin backward
   setMotor(ENA, IN1, IN2, speedFast, false);
-  setMotor(ENB, IN3, IN4, speedFast, false);
+  setMotor(ENB, IN4, IN3, speedFast, false);
   setMotor(ENC, IN6, IN5, speedFast, false);
   setMotor(END, IN8, IN7, speedFast, false);
 }
@@ -79,7 +79,7 @@ void moveBackward() {
 void turnLeft() {
   // Skid Steer: Left wheels Back, Right wheels Forward
   setMotor(ENA, IN1, IN2, speedTurn, false); // Left Back Back
-  setMotor(ENB, IN3, IN4, speedTurn, false); // Left Front Back
+  setMotor(ENB, IN4, IN3, speedTurn, false); // Left Front Back
   setMotor(ENC, IN6, IN5, speedTurn, true);  // Right Back Fwd
   setMotor(END, IN8, IN7, speedTurn, true);  // Right Front Fwd
 }
@@ -87,7 +87,7 @@ void turnLeft() {
 void turnRight() {
   // Skid Steer: Left wheels Forward, Right wheels Back
   setMotor(ENA, IN1, IN2, speedTurn, true);  // Left Back Fwd
-  setMotor(ENB, IN3, IN4, speedTurn, true);  // Left Front Fwd
+  setMotor(ENB, IN4, IN3, speedTurn, true);  // Left Front Fwd
   setMotor(ENC, IN6, IN5, speedTurn, false); // Right Back Back
   setMotor(END, IN8, IN7, speedTurn, false); // Right Front Back
 }
