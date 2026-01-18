@@ -22,7 +22,7 @@ CALIBRATION_PIX_WIDTH = 140
 # ARDUINO CONNECTION Config
 # Raspberry Pi usually assigns /dev/ttyACM0 to the first USB Arduino
 ARDUINO_PORT = '/dev/ttyACM0'  
-ARDUINO_BAUDRATE = 9600        
+ARDUINO_BAUDRATE = 115200        
 
 # Decision Thresholds
 MIN_BLUETOOTH_DISTANCE = 0.5  
