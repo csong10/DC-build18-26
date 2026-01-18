@@ -467,12 +467,29 @@ def test_integrated():
                         "Or reboot: sudo reboot"
                     ) from e
         
+        # Load face cascade for face detection
+        cascade_path = 'haarcascade_frontalface_default.xml'
+        face_cascade = cv2.CascadeClassifier(cascade_path)
+        has_cascade = not face_cascade.empty()
+        
+        if has_cascade:
+            print("✓ Haar cascade loaded for face detection")
+        else:
+            print("⚠ Haar cascade not found - using edge detection only")
+        
+        # Calculate focal length for distance estimation
+        focal_length = calculate_focal_length(
+            CALIBRATION_DISTANCE_CM, FACE_WIDTH_CM, CALIBRATION_PIX_WIDTH
+        )
+        
         # Shared state (matching main script)
         data_lock = threading.Lock()
         shared_state = {
             'obstacle_detected': False,
             'obstacle_position': 'center',
             'obstacle_distance': 100,
+            'face_detected': False,
+            'face_distance': None,
             'running': True
         }
         
@@ -483,34 +500,65 @@ def test_integrated():
                 frame_area = height * width
                 gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
                 
-                blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-                edges = cv2.Canny(blurred, 50, 150)
+                face_detected = False
+                face_dist = None
+                face_x = None
+                obstacle_detected = False
+                obstacle_pos = 'center'
+                obstacle_dist = 100
                 
-                roi = edges[height//3:, :]
-                contours, _ = cv2.findContours(roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                # --- FACE DETECTION (Priority) ---
+                if has_cascade:
+                    faces = face_cascade.detectMultiScale(
+                        gray, scaleFactor=1.05, minNeighbors=4, minSize=(30, 30)
+                    )
+                    
+                    if len(faces) > 0:
+                        faces = sorted(faces, key=lambda x: x[2], reverse=True)
+                        x, y, w, h = faces[0]
+                        face_dist = distance_to_camera(FACE_WIDTH_CM, focal_length, w)
+                        face_x = x + w // 2
+                        face_detected = True
+                        
+                        # Determine face position
+                        if face_x < width // 3:
+                            obstacle_pos = 'left'
+                        elif face_x > 2 * width // 3:
+                            obstacle_pos = 'right'
+                        else:
+                            obstacle_pos = 'center'
+                        
+                        obstacle_detected = True
+                        obstacle_dist = face_dist  # Use actual face distance
                 
-                detected = False
-                pos = 'center'
-                dist = 100
-                
-                for contour in contours:
-                    area = cv2.contourArea(contour)
-                    area_ratio = area / frame_area
-                    if area_ratio > OBSTACLE_AREA_THRESHOLD:
-                        detected = True
-                        x, y, w, h = cv2.boundingRect(contour)
-                        cx = x + w // 2
-                        if cx < width // 3:
-                            pos = 'left'
-                        elif cx > 2 * width // 3:
-                            pos = 'right'
-                        dist = max(0, 100 - (area_ratio * 500))
-                        break
+                # --- EDGE DETECTION (Fallback for non-face obstacles) ---
+                if not face_detected:
+                    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+                    edges = cv2.Canny(blurred, 50, 150)
+                    
+                    roi = edges[height//3:, :]
+                    contours, _ = cv2.findContours(roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    
+                    for contour in contours:
+                        area = cv2.contourArea(contour)
+                        area_ratio = area / frame_area
+                        if area_ratio > OBSTACLE_AREA_THRESHOLD:
+                            obstacle_detected = True
+                            x, y, w, h = cv2.boundingRect(contour)
+                            cx = x + w // 2
+                            if cx < width // 3:
+                                obstacle_pos = 'left'
+                            elif cx > 2 * width // 3:
+                                obstacle_pos = 'right'
+                            obstacle_dist = max(0, 100 - (area_ratio * 500))
+                            break
                 
                 with data_lock:
-                    shared_state['obstacle_detected'] = detected
-                    shared_state['obstacle_position'] = pos
-                    shared_state['obstacle_distance'] = dist
+                    shared_state['obstacle_detected'] = obstacle_detected
+                    shared_state['obstacle_position'] = obstacle_pos
+                    shared_state['obstacle_distance'] = obstacle_dist
+                    shared_state['face_detected'] = face_detected
+                    shared_state['face_distance'] = face_dist
                 
                 time.sleep(0.05)
         
@@ -521,18 +569,41 @@ def test_integrated():
                     detected = shared_state['obstacle_detected']
                     position = shared_state['obstacle_position']
                     distance = shared_state['obstacle_distance']
+                    face = shared_state['face_detected']
+                    face_dist = shared_state['face_distance']
                 
                 # Decision logic matching main script
-                if detected and distance < 30:
+                # Priority 1: Face detection (safety)
+                if face and face_dist is not None:
+                    if face_dist < DANGER_DISTANCE:
+                        command = b'S'
+                        cmd_name = f"STOP (face at {face_dist:.0f}cm)"
+                    elif face_dist < SAFE_DISTANCE:
+                        # Turn away from face
+                        if position == 'left':
+                            command = b'R'
+                            cmd_name = f"RIGHT (face at {face_dist:.0f}cm)"
+                        elif position == 'right':
+                            command = b'L'
+                            cmd_name = f"LEFT (face at {face_dist:.0f}cm)"
+                        else:
+                            command = b'R'  # Default turn right
+                            cmd_name = f"RIGHT (face center at {face_dist:.0f}cm)"
+                    else:
+                        command = b'F'
+                        cmd_name = f"FORWARD (face far at {face_dist:.0f}cm)"
+                
+                # Priority 2: General obstacle
+                elif detected and distance < 30:
                     if position == 'left':
                         command = b'R'
-                        cmd_name = "RIGHT"
+                        cmd_name = "RIGHT (obstacle)"
                     elif position == 'right':
                         command = b'L'
-                        cmd_name = "LEFT"
+                        cmd_name = "LEFT (obstacle)"
                     else:
                         command = b'S'
-                        cmd_name = "STOP"
+                        cmd_name = "STOP (obstacle)"
                 elif detected and distance < 60:
                     command = b'F'
                     cmd_name = "FORWARD (cautious)"
