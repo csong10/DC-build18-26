@@ -77,13 +77,14 @@ def test_bluetooth():
             
             for dev in devices:
                 for (adtype, desc, value) in dev.getScanData():
-                    # if desc == "Manufacturer":
+                    if desc == "Manufacturer":
+                        print(f"DEBUG Manufacturer: {value}")
                         raw = value.lower()
-                        # if raw.startswith("4c000215") and len(raw) >= 50:
-                        uuid = raw[8:40]
-                        if uuid == TARGET_UUID:
-                            print(f"✓ Beacon found! RSSI: {dev.rssi} dBm")
-                            found = True
+                        if raw.startswith("4c000215") and len(raw) >= 50:
+                            uuid = raw[8:40]
+                            if uuid == TARGET_UUID:
+                                print(f"✓ Beacon found! RSSI: {dev.rssi} dBm")
+                                found = True
             
             if not found:
                 print(f"✗ Beacon not found (attempt {i+1}/5)")
