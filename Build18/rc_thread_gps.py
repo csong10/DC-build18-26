@@ -23,6 +23,10 @@ import threading
 import time
 import socket
 import math
+import sys
+import termios
+import tty
+import select
 import cv2
 import numpy as np
 import serial
@@ -44,8 +48,8 @@ DANGER_DISTANCE = 40.0        # Stop if obstacle closer than this (cm)
 SAFE_DISTANCE = 100.0         # Slow down under this distance
 
 # Obstacle Avoidance Config
-OBSTACLE_AREA_THRESHOLD = 0.08
-TURN_DURATION = 0.5
+OBSTACLE_AREA_THRESHOLD = 0.15
+TURN_DURATION = 0.8
 
 # GPS Config (for GPS2IP app)
 GPS_UDP_IP = "0.0.0.0"
@@ -54,7 +58,7 @@ GPS_TIMEOUT = 5
 
 # Navigation Config
 WAYPOINT_REACHED_DISTANCE = 3.0   # meters
-HEADING_TOLERANCE = 15.0          # degrees
+HEADING_TOLERANCE = 30.0          # degrees
 
 # Robot starting position (update to your location)
 ROBOT_START_LAT = 40.4433
@@ -62,6 +66,43 @@ ROBOT_START_LON = -79.9436
 
 # Enable/Disable GPS navigation
 GPS_ENABLED = True
+
+# ===================== KEYBOARD INPUT ===================== #
+
+class KeyboardInput:
+    """Non-blocking keyboard input handler."""
+    
+    def __init__(self):
+        self.old_settings = None
+    
+    def setup(self):
+        """Set terminal to raw mode for single key detection."""
+        try:
+            self.old_settings = termios.tcgetattr(sys.stdin)
+            tty.setcbreak(sys.stdin.fileno())
+            return True
+        except:
+            return False
+    
+    def cleanup(self):
+        """Restore terminal settings."""
+        if self.old_settings:
+            try:
+                termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self.old_settings)
+            except:
+                pass
+    
+    def get_key(self):
+        """
+        Check if a key was pressed (non-blocking).
+        Returns the key character or None if no key pressed.
+        """
+        try:
+            if select.select([sys.stdin], [], [], 0)[0]:
+                return sys.stdin.read(1)
+        except:
+            pass
+        return None
 
 # ===================== GPS FUNCTIONS ===================== #
 
@@ -213,6 +254,11 @@ class RCCarController:
             "right": b'R',
             "stop": b'S',
         }
+        
+        # Keyboard control
+        self.keyboard = KeyboardInput()
+        self.manual_override = False
+        self.paused = False
 
     def initialize(self):
         print("[INIT] Starting initialization...")
@@ -404,6 +450,11 @@ class RCCarController:
         avoiding_since = None
         
         while self.running:
+            # Skip autonomous control when paused
+            if self.paused:
+                time.sleep(0.1)
+                continue
+            
             with self.data_lock:
                 face_dist = self.face_distance
                 face_pos = self.face_position
@@ -494,6 +545,9 @@ class RCCarController:
             
             parts = [f"Mode: {self.current_mode}"]
             
+            if self.paused:
+                parts.insert(0, "⏸ PAUSED")
+            
             if face_dist:
                 parts.append(f"Face: {face_dist:.1f}cm")
             if obstacle:
@@ -508,15 +562,80 @@ class RCCarController:
         
         print("[STATUS] Thread stopped")
 
+    def keyboard_thread(self):
+        """
+        Handle keyboard input for manual control.
+        
+        Keys:
+            SPACE or 'p' - Pause/Resume autonomous mode
+            'q' or ESC   - Quit (emergency stop)
+            'w'          - Manual forward
+            's'          - Manual backward  
+            'a'          - Manual left
+            'd'          - Manual right
+            'x'          - Manual stop
+        """
+        print("[KEYBOARD] Thread started")
+        print("[KEYBOARD] Controls: SPACE=pause, q=quit, w/a/s/d=manual, x=stop")
+        
+        while self.running:
+            key = self.keyboard.get_key()
+            
+            if key:
+                key_lower = key.lower()
+                
+                # Quit / Emergency Stop
+                if key_lower == 'q' or key == '\x1b':  # 'q' or ESC
+                    print("\n[KEYBOARD] *** EMERGENCY STOP ***")
+                    self.send_command("stop")
+                    self.running = False
+                    break
+                
+                # Pause / Resume
+                elif key == ' ' or key_lower == 'p':
+                    self.paused = not self.paused
+                    if self.paused:
+                        print("\n[KEYBOARD] ⏸ PAUSED - Robot stopped")
+                        self.send_command("stop")
+                    else:
+                        print("\n[KEYBOARD] ▶ RESUMED - Autonomous mode")
+                
+                # Manual controls (only when paused)
+                elif self.paused:
+                    if key_lower == 'w':
+                        print("[KEYBOARD] Manual: FORWARD")
+                        self.send_command("forward")
+                    elif key_lower == 's':
+                        print("[KEYBOARD] Manual: BACKWARD")
+                        self.send_command("backward")
+                    elif key_lower == 'a':
+                        print("[KEYBOARD] Manual: LEFT")
+                        self.send_command("left")
+                    elif key_lower == 'd':
+                        print("[KEYBOARD] Manual: RIGHT")
+                        self.send_command("right")
+                    elif key_lower == 'x':
+                        print("[KEYBOARD] Manual: STOP")
+                        self.send_command("stop")
+            
+            time.sleep(0.05)  # Small delay to prevent CPU hogging
+        
+        print("[KEYBOARD] Thread stopped")
+
     def start(self):
         if not self.initialize():
             print("[ERROR] Initialization failed")
             return
         
+        # Setup keyboard input
+        if not self.keyboard.setup():
+            print("[WARN] Keyboard input not available (running in background?)")
+        
         threads = [
             threading.Thread(target=self.camera_thread, daemon=True, name="Camera"),
             threading.Thread(target=self.motor_thread, daemon=True, name="Motor"),
             threading.Thread(target=self.status_thread, daemon=True, name="Status"),
+            threading.Thread(target=self.keyboard_thread, daemon=True, name="Keyboard"),
         ]
         
         if GPS_ENABLED and self.gps_socket:
@@ -530,29 +649,55 @@ class RCCarController:
         print("="*50)
         print(f"GPS: {'Enabled' if GPS_ENABLED else 'Disabled'}")
         print(f"Robot position: {self.robot_lat:.6f}, {self.robot_lon:.6f}")
-        print("Press Ctrl+C to stop")
+        print("")
+        print("KEYBOARD CONTROLS:")
+        print("  SPACE or 'p' - Pause/Resume autonomous mode")
+        print("  'q' or ESC   - Quit (emergency stop)")
+        print("  When paused: w/a/s/d = manual control, x = stop")
+        print("")
+        print("Press Ctrl+C as backup stop")
         print("="*50 + "\n")
         
         try:
-            while True:
-                time.sleep(1)
+            while self.running:
+                time.sleep(0.1)
         except KeyboardInterrupt:
-            print("\n[MAIN] Shutting down...")
+            print("\n[MAIN] Ctrl+C detected...")
+        finally:
             self.stop()
 
     def stop(self):
+        print("[MAIN] Shutting down...")
         self.running = False
         time.sleep(0.5)
         
+        # Stop motors first
         if self.arduino:
-            self.arduino.write(b'S')
-            self.arduino.close()
+            try:
+                self.arduino.write(b'S')
+                self.arduino.close()
+                print("[MAIN] Arduino stopped")
+            except:
+                pass
         
+        # Release camera
         if self.picam2:
-            self.picam2.stop()
+            try:
+                self.picam2.stop()
+                print("[MAIN] Camera released")
+            except:
+                pass
         
+        # Close GPS socket
         if self.gps_socket:
-            self.gps_socket.close()
+            try:
+                self.gps_socket.close()
+                print("[MAIN] GPS closed")
+            except:
+                pass
+        
+        # Restore terminal
+        self.keyboard.cleanup()
         
         print("[MAIN] Stopped")
 
