@@ -24,6 +24,9 @@ import threading
 import subprocess
 import socket
 import math
+import select
+import termios
+import tty
 import numpy as np
 
 # ===================== CONFIGURATION ===================== #
@@ -42,7 +45,7 @@ DANGER_DISTANCE = 40.0
 SAFE_DISTANCE = 100.0
 
 # Obstacle Detection Config
-OBSTACLE_AREA_THRESHOLD = 0.08
+OBSTACLE_AREA_THRESHOLD = 0.1
 
 # GPS Config (for GPS2IP app)
 GPS_UDP_IP = "0.0.0.0"    # Listen on all interfaces
@@ -51,7 +54,7 @@ GPS_TIMEOUT = 10          # Seconds to wait for GPS data
 
 # Navigation Config
 WAYPOINT_REACHED_DISTANCE = 3.0   # meters - consider waypoint reached
-HEADING_TOLERANCE = 15.0          # degrees - acceptable heading error
+HEADING_TOLERANCE = 30.0          # degrees - acceptable heading error
 
 # Robot's starting position (set this to your known starting point or use GPS)
 # Example: CMU campus coordinates
@@ -116,6 +119,50 @@ def release_camera():
         time.sleep(0.5)
     except:
         pass
+
+# ===================== KEYBOARD INPUT ===================== #
+
+class KeyboardInput:
+    """Non-blocking keyboard input handler for manual control."""
+    
+    def __init__(self):
+        self.old_settings = None
+        self.enabled = False
+    
+    def setup(self):
+        """Set terminal to raw mode for single key detection."""
+        try:
+            self.old_settings = termios.tcgetattr(sys.stdin)
+            tty.setcbreak(sys.stdin.fileno())
+            self.enabled = True
+            return True
+        except Exception as e:
+            print(f"  (Keyboard input not available: {e})")
+            self.enabled = False
+            return False
+    
+    def cleanup(self):
+        """Restore terminal settings."""
+        if self.old_settings:
+            try:
+                termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self.old_settings)
+            except:
+                pass
+        self.enabled = False
+    
+    def get_key(self):
+        """
+        Check if a key was pressed (non-blocking).
+        Returns the key character or None if no key pressed.
+        """
+        if not self.enabled:
+            return None
+        try:
+            if select.select([sys.stdin], [], [], 0)[0]:
+                return sys.stdin.read(1)
+        except:
+            pass
+        return None
 
 # ===================== GPS FUNCTIONS ===================== #
 
@@ -682,7 +729,7 @@ def test_gps_navigation():
 
 
 def test_integrated_gps():
-    """Test integrated camera + motor + GPS navigation."""
+    """Test integrated camera + motor + GPS navigation with keyboard control."""
     print("\n" + "="*60)
     print("TESTING: Integrated Camera + Motor + GPS")
     print("="*60)
@@ -691,6 +738,10 @@ def test_integrated_gps():
     print("2. Camera-based obstacle avoidance")
     print("3. Path of least resistance turning")
     print("\n⚠ WARNING: The car will move!")
+    print("\nKEYBOARD CONTROLS:")
+    print("  SPACE or 'p' - Pause/Resume autonomous mode")
+    print("  'q' or ESC   - Quit (emergency stop)")
+    print("  When paused: w/a/s/d = manual control, x = stop")
     
     response = input("\nProceed? (y/n): ").strip().lower()
     if response != 'y':
@@ -699,11 +750,15 @@ def test_integrated_gps():
     arduino = None
     picam2 = None
     gps = None
+    keyboard = KeyboardInput()
     
     try:
         import serial
         import cv2
         from picamera2 import Picamera2
+        
+        # Setup keyboard
+        keyboard.setup()
         
         # Connect Arduino
         ports_to_try = [ARDUINO_PORT, '/dev/ttyACM1', '/dev/ttyUSB0']
@@ -717,6 +772,7 @@ def test_integrated_gps():
         
         if arduino is None:
             print("✗ Could not connect to Arduino")
+            keyboard.cleanup()
             return False
         
         time.sleep(2)
@@ -763,7 +819,8 @@ def test_integrated_gps():
             'goal_lon': None,
             'goal_distance': None,
             'goal_bearing': None,
-            'running': True
+            'running': True,
+            'paused': False
         }
         
         def camera_worker():
@@ -838,6 +895,11 @@ def test_integrated_gps():
             last_command = None
             
             while shared_state['running']:
+                # Skip autonomous control when paused
+                if shared_state['paused']:
+                    time.sleep(0.1)
+                    continue
+                
                 with data_lock:
                     face = shared_state['face_detected']
                     face_dist = shared_state['face_distance']
@@ -885,13 +947,58 @@ def test_integrated_gps():
                 
                 time.sleep(0.1)
         
-        print("\nStarting integrated test for 30 seconds...")
-        print("The robot will navigate toward your phone while avoiding obstacles")
+        def keyboard_worker():
+            """Handle keyboard input for manual control."""
+            while shared_state['running']:
+                key = keyboard.get_key()
+                
+                if key:
+                    key_lower = key.lower()
+                    
+                    # Quit / Emergency Stop
+                    if key_lower == 'q' or key == '\x1b':  # 'q' or ESC
+                        print("\n  [KEYBOARD] *** EMERGENCY STOP ***")
+                        arduino.write(b'S')
+                        shared_state['running'] = False
+                        break
+                    
+                    # Pause / Resume
+                    elif key == ' ' or key_lower == 'p':
+                        shared_state['paused'] = not shared_state['paused']
+                        if shared_state['paused']:
+                            print("\n  [KEYBOARD] ⏸ PAUSED - Robot stopped")
+                            arduino.write(b'S')
+                        else:
+                            print("\n  [KEYBOARD] ▶ RESUMED - Autonomous mode")
+                    
+                    # Manual controls (only when paused)
+                    elif shared_state['paused']:
+                        if key_lower == 'w':
+                            print("  [KEYBOARD] Manual: FORWARD")
+                            arduino.write(b'F')
+                        elif key_lower == 's':
+                            print("  [KEYBOARD] Manual: BACKWARD")
+                            arduino.write(b'B')
+                        elif key_lower == 'a':
+                            print("  [KEYBOARD] Manual: LEFT")
+                            arduino.write(b'L')
+                        elif key_lower == 'd':
+                            print("  [KEYBOARD] Manual: RIGHT")
+                            arduino.write(b'R')
+                        elif key_lower == 'x':
+                            print("  [KEYBOARD] Manual: STOP")
+                            arduino.write(b'S')
+                
+                time.sleep(0.05)
+        
+        print("\n" + "-"*40)
+        print("TEST RUNNING - Press 'q' to stop, SPACE to pause")
         print("-" * 40)
         
         threads = [
             threading.Thread(target=camera_worker, daemon=True),
             threading.Thread(target=motor_worker, daemon=True),
+            threading.Thread(target=keyboard_worker, daemon=True),
         ]
         
         if gps:
@@ -900,13 +1007,19 @@ def test_integrated_gps():
         for t in threads:
             t.start()
         
-        time.sleep(30)
+        # Wait until stopped by keyboard or timeout
+        start_time = time.time()
+        max_duration = 60  # 60 second max
+        
+        while shared_state['running'] and (time.time() - start_time) < max_duration:
+            time.sleep(0.1)
         
         shared_state['running'] = False
         time.sleep(0.5)
         
         # Cleanup
         print("\nCleaning up...")
+        keyboard.cleanup()
         arduino.write(b'S')
         arduino.close()
         picam2.stop()
@@ -925,6 +1038,7 @@ def test_integrated_gps():
         import traceback
         traceback.print_exc()
         
+        keyboard.cleanup()
         if arduino:
             try:
                 arduino.write(b'S')
@@ -1053,15 +1167,18 @@ def test_path_clearance():
 
 
 def test_motor_sequence():
-    """Test motor sequence."""
+    """Test motor sequence with keyboard stop option."""
     print("\n" + "="*60)
     print("TESTING: Motor Sequence")
     print("="*60)
     print("⚠ The car will move!")
+    print("Press 'q' during test to emergency stop")
     
     response = input("Proceed? (y/n): ").strip().lower()
     if response != 'y':
         return None
+    
+    keyboard = KeyboardInput()
     
     try:
         import serial
@@ -1080,6 +1197,7 @@ def test_motor_sequence():
             return False
         
         time.sleep(2)
+        keyboard.setup()
         
         sequence = [
             (b'F', "Forward", 1.5),
@@ -1092,19 +1210,49 @@ def test_motor_sequence():
             (b'S', "Stop", 0.5),
         ]
         
-        print("\nExecuting sequence...")
+        print("\nExecuting sequence... (press 'q' to stop)")
+        stopped_early = False
+        
         for cmd, name, dur in sequence:
+            # Check for stop key
+            key = keyboard.get_key()
+            if key and key.lower() == 'q':
+                print("\n  *** EMERGENCY STOP ***")
+                arduino.write(b'S')
+                stopped_early = True
+                break
+            
             print(f"  {name}...")
             arduino.write(cmd)
-            time.sleep(dur)
+            
+            # Check for stop during movement
+            start = time.time()
+            while time.time() - start < dur:
+                key = keyboard.get_key()
+                if key and key.lower() == 'q':
+                    print("\n  *** EMERGENCY STOP ***")
+                    arduino.write(b'S')
+                    stopped_early = True
+                    break
+                time.sleep(0.05)
+            
+            if stopped_early:
+                break
         
+        keyboard.cleanup()
+        arduino.write(b'S')
         arduino.close()
-        print("✓ Sequence complete!")
         
+        if stopped_early:
+            print("Test stopped by user")
+            return None
+        
+        print("✓ Sequence complete!")
         return input("Did it work? (y/n): ").strip().lower() == 'y'
         
     except Exception as e:
         print(f"✗ Error: {e}")
+        keyboard.cleanup()
         return False
 
 
