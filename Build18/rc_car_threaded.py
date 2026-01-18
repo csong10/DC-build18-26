@@ -19,19 +19,19 @@ FACE_WIDTH_CM = 14.0
 CALIBRATION_DISTANCE_CM = 50.0
 CALIBRATION_PIX_WIDTH = 140
 
-# UART Config
-UART_PORT = '/dev/ttyAMA0'  # Default UART port on Raspberry Pi
-UART_BAUDRATE = 115200       # Adjust to match your STM32 configuration
+# ARDUINO CONNECTION Config
+# Raspberry Pi usually assigns /dev/ttyACM0 to the first USB Arduino
+ARDUINO_PORT = '/dev/ttyACM0'  
+ARDUINO_BAUDRATE = 9600        
 
 # Decision Thresholds
-MIN_BLUETOOTH_DISTANCE = 0.5  # meters - stop when this close to beacon
-DANGER_DISTANCE = 80.0        # cm - stop immediately if obstacle this close
-SAFE_DISTANCE = 150.0         # cm - obstacle far enough to proceed
+MIN_BLUETOOTH_DISTANCE = 0.5  
+DANGER_DISTANCE = 40.0        
+SAFE_DISTANCE = 100.0         
 
-# ===================== BLUETOOTH BEACON FUNCTIONS ===================== #
-
+# ===================== BLUETOOTH FUNCTIONS ===================== #
+# (Kept identical to your original)
 def parse_ibeacon(scan_entry):
-    """Extract iBeacon data from scan entry"""
     for (adtype, desc, value) in scan_entry.getScanData():
         if desc == "Manufacturer":
             raw = value.lower()
@@ -40,36 +40,28 @@ def parse_ibeacon(scan_entry):
                 major = int(raw[40:44], 16)
                 minor = int(raw[44:48], 16)
                 tx_power = int(raw[48:50], 16)
-                if tx_power > 127:
-                    tx_power -= 256
+                if tx_power > 127: tx_power -= 256
                 return uuid, major, minor, tx_power
     return None
 
 def estimate_distance(rssi: float, tx_power: int, n: float = PATH_LOSS_N):
-    """Estimate distance using log-distance path loss model"""
-    if rssi == 0:
-        return None
+    if rssi == 0: return None
     ratio_db = tx_power - rssi
-    distance = 10 ** (ratio_db / (10 * n))
-    return distance
+    return 10 ** (ratio_db / (10 * n))
 
 # ===================== CAMERA FUNCTIONS ===================== #
-
 def calculate_focal_length(known_dist, known_width, width_pix):
-    """Calculate focal length for distance estimation"""
     return (width_pix * known_dist) / known_width
 
 def distance_to_camera(known_width, focal_length, pixel_width):
-    """Calculate distance to object based on pixel width"""
-    if pixel_width == 0:
-        return 0
+    if pixel_width == 0: return 0
     return (known_width * focal_length) / pixel_width
 
-# ===================== MAIN RC CAR CONTROLLER ===================== #
+# ===================== MAIN CONTROLLER ===================== #
 
 class RCCarController:
     def __init__(self):
-        # Shared data between threads
+        # Shared data
         self.bluetooth_distance = None
         self.bluetooth_rssi = None
         self.closest_face_distance = None
@@ -77,349 +69,198 @@ class RCCarController:
         self.face_frame_width = None
         self.running = True
         
-        # Thread synchronization
+        # Locks & Communication
         self.data_lock = threading.Lock()
-        
-        # UART for STM32 communication
-        self.uart = None
-        self.command_queue = Queue()
+        self.arduino = None
         
         # Components
         self.scanner = None
         self.picam2 = None
         self.face_cascade = None
         self.focal_length = None
+        self.current_mode = "SEARCHING"
         
-        # Mode tracking
-        self.current_mode = "SEARCHING"  # SEARCHING, FOLLOWING_BEACON, AVOIDING_OBSTACLE
-        
+        # Command Mapping (Python String -> Arduino Char)
+        self.CMD_MAP = {
+            "forward": b'F',
+            "backward": b'B',
+            "left": b'L',
+            "right": b'R',
+            "stop": b'S',
+            "search": b'L' # Default search behavior is spinning left
+        }
+
     def initialize_components(self):
-        """Initialize all hardware components"""
         print("[INIT] Initializing components...")
         
-        # Initialize UART
+        # 1. Connect to Arduino via USB
         try:
-            self.uart = serial.Serial(UART_PORT, UART_BAUDRATE, timeout=1)
-            print(f"[INIT] UART initialized on {UART_PORT} at {UART_BAUDRATE} baud")
+            self.arduino = serial.Serial(ARDUINO_PORT, ARDUINO_BAUDRATE, timeout=1)
+            time.sleep(2) # CRITICAL: Wait for Arduino to reboot after USB connection
+            print(f"[INIT] Arduino connected on {ARDUINO_PORT}")
         except Exception as e:
-            print(f"[ERROR] UART initialization failed: {e}")
-            print("[WARNING] Running without UART - commands will be printed only")
-        
-        # Initialize Bluetooth Scanner
+            print(f"[ERROR] Arduino connection failed: {e}")
+            print("  -> Is the USB cable plugged in?")
+            print("  -> Did you upload the Arduino code?")
+
+        # 2. Bluetooth
         try:
             self.scanner = Scanner()
-            print("[INIT] Bluetooth scanner initialized")
+            print("[INIT] Bluetooth initialized")
         except Exception as e:
-            print(f"[ERROR] Bluetooth scanner initialization failed: {e}")
-        
-        # Initialize Camera
+            print(f"[ERROR] Bluetooth failed: {e}")
+
+        # 3. Camera
         try:
             self.face_cascade = cv2.CascadeClassifier('haarcascade_frontalface_default.xml')
-            if self.face_cascade.empty():
-                raise Exception("Haar cascade XML file not found")
+            if self.face_cascade.empty(): raise Exception("XML file missing")
             
             self.picam2 = Picamera2()
-            config = self.picam2.create_video_configuration(
-                main={"format": "RGB888", "size": (640, 480)}
-            )
+            config = self.picam2.create_video_configuration(main={"format": "RGB888", "size": (640, 480)})
             self.picam2.configure(config)
             self.picam2.start()
             
-            # Calculate focal length for distance estimation
-            self.focal_length = calculate_focal_length(
-                CALIBRATION_DISTANCE_CM, 
-                FACE_WIDTH_CM, 
-                CALIBRATION_PIX_WIDTH
-            )
-            
-            print("[INIT] Camera initialized with face detection")
+            self.focal_length = calculate_focal_length(CALIBRATION_DISTANCE_CM, FACE_WIDTH_CM, CALIBRATION_PIX_WIDTH)
+            print("[INIT] Camera initialized")
         except Exception as e:
-            print(f"[ERROR] Camera initialization failed: {e}")
-        
-        print("[INIT] All components initialized\n")
-    
-    # ===================== BLUETOOTH THREAD ===================== #
-    
+            print(f"[ERROR] Camera failed: {e}")
+
+    # --- THREADS (Bluetooth and Camera logic remains largely same) ---
+
     def bluetooth_thread(self):
-        """Continuously scan for Bluetooth beacon and estimate distance"""
-        print("[BT] Bluetooth thread started")
-        
+        print("[BT] Started")
         while self.running:
             try:
                 if self.scanner is None:
-                    time.sleep(1)
-                    continue
+                    time.sleep(1); continue
                 
-                rssi_values = []
-                tx_power_values = []
+                rssi_vals = []
+                tx_vals = []
                 
-                # Take multiple samples for averaging
                 for _ in range(SAMPLES_PER_READING):
-                    if not self.running:
-                        break
-                    
+                    if not self.running: break
                     devices = self.scanner.scan(0.4)
                     for dev in devices:
                         data = parse_ibeacon(dev)
-                        if data:
-                            uuid, major, minor, tx_power = data
-                            if uuid == TARGET_UUID:
-                                rssi_values.append(dev.rssi)
-                                tx_power_values.append(tx_power)
-                    time.sleep(0.05)
+                        if data and data[0] == TARGET_UUID:
+                            rssi_vals.append(dev.rssi)
+                            tx_vals.append(data[3])
                 
-                # Calculate average and distance
-                if rssi_values:
-                    avg_rssi = sum(rssi_values) / len(rssi_values)
-                    avg_tx_power = int(sum(tx_power_values) / len(tx_power_values))
-                    distance = estimate_distance(avg_rssi, avg_tx_power)
-                    
-                    with self.data_lock:
-                        self.bluetooth_distance = distance
-                        self.bluetooth_rssi = avg_rssi
+                if rssi_vals:
+                    dist = estimate_distance(sum(rssi_vals)/len(rssi_vals), int(sum(tx_vals)/len(tx_vals)))
+                    with self.data_lock: self.bluetooth_distance = dist
                 else:
-                    with self.data_lock:
-                        self.bluetooth_distance = None
-                        self.bluetooth_rssi = None
+                    with self.data_lock: self.bluetooth_distance = None
                 
-                time.sleep(0.1)  # Brief pause between scan cycles
-                
-            except Exception as e:
-                print(f"[BT ERROR] {e}")
-                time.sleep(1)
-        
-        print("[BT] Bluetooth thread stopped")
-    
-    # ===================== CAMERA THREAD ===================== #
-    
+            except Exception as e: print(f"[BT ERR] {e}"); time.sleep(1)
+
     def camera_thread(self):
-        """Continuously process camera feed for face detection"""
-        print("[CAM] Camera thread started")
-        
+        print("[CAM] Started")
         while self.running:
             try:
-                if self.picam2 is None or self.face_cascade is None:
-                    time.sleep(1)
-                    continue
-                
-                # Capture frame
+                if self.picam2 is None: time.sleep(1); continue
                 frame = self.picam2.capture_array()
-                if frame is None:
-                    continue
+                if frame is None: continue
                 
-                # Convert to grayscale for face detection
                 gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+                faces = self.face_cascade.detectMultiScale(gray, 1.05, 4, (30,30))
                 
-                # Detect faces
-                faces = self.face_cascade.detectMultiScale(
-                    gray,
-                    scaleFactor=1.05,
-                    minNeighbors=4,
-                    minSize=(30, 30)
-                )
-                
-                # Process detected faces
                 if len(faces) > 0:
-                    detected_objects = []
-                    for (x, y, w, h) in faces:
-                        dist = distance_to_camera(FACE_WIDTH_CM, self.focal_length, w)
-                        detected_objects.append((dist, x, y, w, h))
-                    
-                    # Sort by distance (closest first)
-                    detected_objects.sort(key=lambda x: x[0])
-                    
-                    # Get closest face
-                    closest = detected_objects[0]
-                    dist, x, y, w, h = closest
+                    # Sort faces by width (largest = closest)
+                    faces = sorted(faces, key=lambda x: x[2], reverse=True)
+                    x, y, w, h = faces[0]
+                    dist = distance_to_camera(FACE_WIDTH_CM, self.focal_length, w)
                     
                     with self.data_lock:
                         self.closest_face_distance = dist
-                        self.closest_face_x = x + w // 2  # Center X coordinate
-                        self.face_frame_width = frame.shape[1]  # Frame width for centering
+                        self.closest_face_x = x + w//2
+                        self.face_frame_width = frame.shape[1]
                 else:
                     with self.data_lock:
                         self.closest_face_distance = None
-                        self.closest_face_x = None
-                        self.face_frame_width = None
                 
-                time.sleep(0.05)  # ~20 FPS camera processing
-                
-            except Exception as e:
-                print(f"[CAM ERROR] {e}")
-                time.sleep(0.5)
-        
-        print("[CAM] Camera thread stopped")
-    
-    # ===================== DECISION & MOTOR CONTROL THREAD ===================== #
-    
+                time.sleep(0.05)
+            except Exception as e: print(f"[CAM ERR] {e}"); time.sleep(0.5)
+
+    # --- MOTOR CONTROL ---
+
     def motor_control_thread(self):
-        """Make decisions and send commands to STM32 based on sensor data"""
-        print("[MOTOR] Motor control thread started")
-        
+        print("[MOTOR] Started")
+        last_command = None
+
         while self.running:
-            try:
-                # Read all sensor data safely
-                with self.data_lock:
-                    bt_distance = self.bluetooth_distance
-                    bt_rssi = self.bluetooth_rssi
-                    face_distance = self.closest_face_distance
-                    face_x = self.closest_face_x
-                    frame_width = self.face_frame_width
-                
-                command = None
-                
-                # Decision Logic - Priority System
-                # 1. HIGHEST PRIORITY: Avoid obstacles (faces)
-                if face_distance is not None and face_x is not None and frame_width is not None:
-                    self.current_mode = "AVOIDING_OBSTACLE"
-                    command = self.avoid_obstacle(face_distance, face_x, frame_width)
-                
-                # 2. If no obstacles, follow beacon
-                elif bt_distance is not None:
-                    self.current_mode = "FOLLOWING_BEACON"
-                    command = self.decide_beacon_following(bt_distance)
-                
-                # 3. No beacon and no obstacles - search
+            with self.data_lock:
+                bt_dist = self.bluetooth_distance
+                face_dist = self.closest_face_distance
+                face_x = self.closest_face_x
+                width = self.face_frame_width
+
+            command = "stop" # Default safe state
+
+            # 1. OBSTACLE AVOIDANCE (Priority High)
+            if face_dist is not None:
+                self.current_mode = "AVOIDING"
+                if face_dist < DANGER_DISTANCE:
+                    command = "stop"
+                elif face_dist < SAFE_DISTANCE:
+                    # Turn away from face
+                    center = width // 2
+                    if face_x > center: command = "left"  # Face is right, turn left
+                    else: command = "right"               # Face is left, turn right
                 else:
-                    self.current_mode = "SEARCHING"
-                    command = "search"
-                
-                # Send command to STM32
-                if command:
-                    self.send_command(command)
-                
-                time.sleep(0.02)  # 50Hz motor control update rate
-                
-            except Exception as e:
-                print(f"[MOTOR ERROR] {e}")
-                time.sleep(0.5)
-        
-        # Stop motors when exiting
-        self.send_command("stop")
-        print("[MOTOR] Motor control thread stopped")
-    
-    def avoid_obstacle(self, distance, face_x, frame_width):
-        """Determine motor command to avoid detected obstacle (face)"""
-        frame_center = frame_width // 2
-        x_offset = face_x - frame_center
-        
-        # Danger zone distances
-        DANGER_DISTANCE = 80.0  # cm - stop if obstacle is this close
-        SAFE_DISTANCE = 150.0   # cm - can proceed if obstacle is far enough
-        
-        print(f"[OBSTACLE] Distance: {distance:.1f}cm | X-offset: {x_offset:+4d}px | Mode: {self.current_mode}")
-        
-        # If obstacle is very close, stop immediately
-        if distance < DANGER_DISTANCE:
-            print(f"[OBSTACLE] TOO CLOSE! Stopping.")
-            return "stop"
-        
-        # If obstacle is in the way but not too close, navigate around it
-        elif distance < SAFE_DISTANCE:
-            # Turn away from the obstacle
-            # If obstacle is on the right (+offset), turn left
-            # If obstacle is on the left (-offset), turn right
-            if x_offset > 0:
-                print(f"[OBSTACLE] Avoiding - turning left")
-                return "left"
+                    # Face seen but far away, fall through to beacon logic
+                    pass 
+
+            # 2. BEACON FOLLOWING
+            if command == "stop" and bt_dist is not None and self.current_mode != "AVOIDING":
+                self.current_mode = "FOLLOWING"
+                if bt_dist > MIN_BLUETOOTH_DISTANCE:
+                    command = "forward"
+                else:
+                    command = "stop" # Reached target
+            elif command == "stop" and bt_dist is None and self.current_mode != "AVOIDING":
+                 self.current_mode = "SEARCHING"
+                 command = "search" # Will map to spin left
+
+            # Send command only if it changed (reduces USB traffic)
+            if command != last_command:
+                self.send_to_arduino(command)
+                last_command = command
+            
+            time.sleep(0.1)
+
+        self.send_to_arduino("stop")
+
+    def send_to_arduino(self, command_str):
+        """Maps string command to byte character and sends via USB"""
+        if self.arduino and self.arduino.is_open:
+            if command_str in self.CMD_MAP:
+                byte_cmd = self.CMD_MAP[command_str]
+                self.arduino.write(byte_cmd)
+                print(f"[ARDUINO] Sent: {command_str} -> {byte_cmd}")
             else:
-                print(f"[OBSTACLE] Avoiding - turning right")
-                return "right"
-        
-        # Obstacle is far enough - continue with beacon following if available
-        # This allows the motor thread to check beacon on next iteration
-        else:
-            return None  # Let beacon following take over
-    
-    def decide_beacon_following(self, distance):
-        """Determine motor command based on beacon distance"""
-        print(f"[BEACON] Distance: {distance:.2f}m | Mode: {self.current_mode}")
-        
-        # Move toward beacon until minimum distance reached
-        if distance > MIN_BLUETOOTH_DISTANCE:
-            return "forward"
-        else:
-            return "stop"  # Close enough to beacon
-    
-    def send_command(self, command):
-        """Send command string to STM32 via UART"""
-        try:
-            if self.uart and self.uart.is_open:
-                # Send command with newline terminator
-                message = f"{command}\n"
-                self.uart.write(message.encode('utf-8'))
-                print(f"[UART] Sent: {command}")
-            else:
-                # Fallback: just print if UART not available
-                print(f"[UART DISABLED] Would send: {command}")
-        except Exception as e:
-            print(f"[UART ERROR] {e}")
-    
-    # ===================== MAIN CONTROL ===================== #
-    
+                print(f"[ARDUINO] Unknown command: {command_str}")
+
     def start(self):
-        """Initialize and start all threads"""
-        # Initialize hardware
         self.initialize_components()
+        t1 = threading.Thread(target=self.bluetooth_thread, daemon=True)
+        t2 = threading.Thread(target=self.camera_thread, daemon=True)
+        t3 = threading.Thread(target=self.motor_control_thread, daemon=True)
+        t1.start(); t2.start(); t3.start()
         
-        # Create threads
-        bt_thread = threading.Thread(target=self.bluetooth_thread, name="Bluetooth", daemon=True)
-        cam_thread = threading.Thread(target=self.camera_thread, name="Camera", daemon=True)
-        motor_thread = threading.Thread(target=self.motor_control_thread, name="Motors", daemon=True)
-        
-        # Start all threads
-        bt_thread.start()
-        cam_thread.start()
-        motor_thread.start()
-        
-        print("\n" + "="*60)
-        print("RC CAR SYSTEM RUNNING")
-        print("="*60)
-        print("Priority: 1. Avoid Obstacles  2. Follow Beacon  3. Search")
-        print("Press Ctrl+C to stop")
-        print("="*60 + "\n")
-        
-        # Keep main thread alive
+        print("\n=== ROVER RUNNING ===")
+        print("Ctrl+C to stop")
         try:
-            while True:
-                time.sleep(1)
-                # Optional: Print periodic status
-                with self.data_lock:
-                    print(f"[STATUS] Mode: {self.current_mode} | "
-                          f"BT: {'Yes' if self.bluetooth_distance else 'No'} | "
-                          f"Obstacle: {'Yes' if self.closest_face_distance else 'No'}")
+            while True: time.sleep(1)
         except KeyboardInterrupt:
-            print("\n[STOP] Shutting down...")
             self.stop()
-    
+
     def stop(self):
-        """Stop all threads and cleanup"""
         self.running = False
-        time.sleep(0.5)  # Give threads time to finish
-        
-        # Stop camera
-        if self.picam2:
-            try:
-                self.picam2.stop()
-                print("[CLEANUP] Camera stopped")
-            except:
-                pass
-        
-        # Close UART
-        if self.uart and self.uart.is_open:
-            try:
-                self.uart.close()
-                print("[CLEANUP] UART closed")
-            except:
-                pass
-        
-        print("[CLEANUP] All systems stopped")
-
-# ===================== ENTRY POINT ===================== #
-
-def main():
-    car = RCCarController()
-    car.start()
+        time.sleep(0.5)
+        if self.arduino: self.arduino.close()
+        if self.picam2: self.picam2.stop()
+        print("System Stopped.")
 
 if __name__ == "__main__":
-    main()
+    RCCarController().start()

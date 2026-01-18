@@ -195,22 +195,22 @@ void uart_irq_handler(){
     //set motor direction as soon as it receives UART from serial port
     switch(c) {
       case 'f':
-        sys_motor_set(LEFT_MOTOR, MIN_DUTY_CYCLE, FORWARD);
+        sys_motor_set(LF_MOTOR, MIN_DUTY_CYCLE, FORWARD);
         break;
       case 'b':
-        sys_motor_set(LEFT_MOTOR, MIN_DUTY_CYCLE, BACKWARD);
+        sys_motor_set(LF_MOTOR, MIN_DUTY_CYCLE, BACKWARD);
         break;
       case 'r': 
-        sys_motor_set(LEFT_MOTOR, MIN_DUTY_CYCLE, RIGHT);
+        sys_motor_set(LF_MOTOR, MIN_DUTY_CYCLE, RIGHT);
         break;
       case 'l':
-        sys_motor_set(LEFT_MOTOR, MIN_DUTY_CYCLE, LEFT);
+        sys_motor_set(LF_MOTOR, MIN_DUTY_CYCLE, LEFT);
         break;
       case 'x':
-        sys_motor_set(LEFT_MOTOR, MIN_DUTY_CYCLE, FREE);
+        sys_motor_set(LF_MOTOR, MIN_DUTY_CYCLE, FREE);
         break;
       case 's': 
-        sys_motor_set(LEFT_MOTOR, MIN_DUTY_CYCLE, STOP);
+        sys_motor_set(LF_MOTOR, MIN_DUTY_CYCLE, STOP);
     }
 
     rx_enq(c);

@@ -19,8 +19,10 @@ typedef enum motor_direction
 
 enum motor_mapping
 {
-    LEFT_MOTOR,
-    RIGHT_MOTOR
+    LB_MOTOR,
+    RB_MOTOR,
+    LF_MOTOR,
+    RF_MOTOR
 };
 
 struct motor_timer

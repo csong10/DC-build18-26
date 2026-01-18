@@ -32,7 +32,6 @@ void motor_init(enum motor_mapping motor, struct motor_attr *attr,
               attr->timer.gpio_alt);
 
     (void) enc_attr;
-    // encoder_init((enum encoder_mapping)motor, enc_attr);
 
     IS_COMP = (attr->timer.is_comp) ? 1 : 0;
     timer_start_pwm(PWM_PERIOD, 0, attr->timer.timer, attr->timer.channel);
@@ -62,15 +61,15 @@ int sys_motor_set(enum motor_mapping motor, uint32_t duty_cycle,
 
           timer_set_duty_cycle(motors[motor].timer.timer, motors[motor].timer.channel, 0);
           break;
-        case FORWARD:
-          gpio_set(motors[motor].motor_in1.port, motors[motor].motor_in1.num);
-          gpio_clr(motors[motor].motor_in2.port, motors[motor].motor_in2.num);
+        case FORWARD: //changed for left motor
+          gpio_clr(motors[motor].motor_in1.port, motors[motor].motor_in1.num);
+          gpio_set(motors[motor].motor_in2.port, motors[motor].motor_in2.num);
 
           timer_set_duty_cycle(motors[motor].timer.timer, motors[motor].timer.channel, real_duty);
           break;
         case BACKWARD:
-          gpio_clr(motors[motor].motor_in1.port, motors[motor].motor_in1.num);
-          gpio_set(motors[motor].motor_in2.port, motors[motor].motor_in2.num);
+          gpio_set(motors[motor].motor_in1.port, motors[motor].motor_in1.num);
+          gpio_clr(motors[motor].motor_in2.port, motors[motor].motor_in2.num);
 
           timer_set_duty_cycle(motors[motor].timer.timer, motors[motor].timer.channel, real_duty);
           break;

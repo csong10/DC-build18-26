@@ -26,7 +26,7 @@
 #define MIN_SPEED 0
 
 #define MAX_DUTY_CYCLE 100
-#define MIN_DUTY_CYCLE 20
+#define MIN_DUTY_CYCLE 45
 
 #define MAX(x,y) (((x) > (y)) ? (x) : (y))
 #define MIN(x,y) (((x) < (y)) ? (x) : (y)) 
@@ -52,49 +52,77 @@ enca2 = {.port = GPIO_C, .num = 1, .irq_num = 7},
 encb1 = {.port = GPIO_C, .num = 0, .irq_num = 6},
 // MOTOR_IN1 : PA10 D2
 motor_in1 = {.port = GPIO_A, .num = 10},
+// ENCB2 : PB10 (exti15_10) 
+encb2 = {.port = GPIO_B, .num = 10, .irq_num = 40},
+// MOTOR_IN3 : PA8 D7
+motor_in3 = {.port = GPIO_A, .num = 8},
+// MOTOR_IN4 : PA7 D11
+motor_in4 = {.port = GPIO_A, .num = 7},
+// MOTOR_IN5 : PA6 D12
+motor_in5 = {.port = GPIO_A, .num = 6},
+// MOTOR_IN6 : PA1 A1
+motor_in6 = {.port = GPIO_A, .num = 1},
+// MOTOR_IN7 : PC0 A5
+motor_in7 = {.port = GPIO_C, .num = 0},
+// MOTOR_IN8 : PC1 A4
+motor_in8 = {.port = GPIO_C, .num = 1},
+// MOTOR_ENC : PB6 (PWM4/1) D10
+motor_enc = {.port = GPIO_B, .num = 6},
+// MOTOR_END : PB5 (PWM3/2) D4
+motor_end = {.port = GPIO_B, .num = 5},
 // MOTOR_ENA : PB3 (PWM2/2) D3
 motor_ena = {.port = GPIO_B, .num = 3},
-// MOTOR_ENB : PB4 (PWM3/1)
-motor_enb = {.port = GPIO_B, .num = 4},
-// ENCB2 : PB10 (exti15_10)
-encb2 = {.port = GPIO_B, .num = 10, .irq_num = 40},
-// MOTOR_IN3 : PA8
-motor_in3 = {.port = GPIO_A, .num = 8},
-// MOTOR_IN4 : PA7
-motor_in4 = {.port = GPIO_A, .num = 7};
-// // SDA : PB9
-// sda = {.port = GPIO_B, .num = 9},
-// // SCL : PB8
-// scl = {.port = GPIO_B, .num = 8};
+// MOTOR_ENB : PB4 (PWM3/1) D5
+motor_enb = {.port = GPIO_B, .num = 4};
 
-// motor3,4 : Right
-struct encoder_pin_attr enc_r = 
+// motor3,4 : left front B
+struct encoder_pin_attr enc_rb = 
   {.encoder_pin_a = enca2, .encoder_pin_b = encb2};
 
-struct motor_timer time_r = 
+struct motor_timer time_lf = 
   {.channel = 1, .gpio_alt = 2, .is_comp = 0, .timer = 3};
 
-struct motor_attr attr_r = 
+struct motor_attr attr_lf = 
   {.motor_in1 = motor_in3, .motor_in2 = motor_in4, .motor_en = motor_enb,
-   .timer = time_r};
+   .timer = time_lf};
 
-// motor1,2 : Left
-struct encoder_pin_attr enc_l = 
+// motor1,2 : left back A
+struct encoder_pin_attr enc_lb = 
     {.encoder_pin_a = enca1, .encoder_pin_b = encb1};
 
-struct motor_timer time_l = 
+struct motor_timer time_lb = 
   {.channel = 2, .gpio_alt = 1, .is_comp = 0, .timer = 2};
 
-struct motor_attr attr_l = 
+struct motor_attr attr_lb = 
   {.motor_in1 = motor_in2, .motor_in2 = motor_in1, .motor_en = motor_ena,
-   .timer = time_l};
+   .timer = time_lb};
+
+//motor5,6 : right front C
+struct motor_timer time_rf = 
+  {.channel = 1, .gpio_alt = 2, .is_comp = 0, .timer = 4};
+
+struct motor_attr attr_rf =
+  {.motor_in1 = motor_in6, .motor_in2 = motor_in5, .motor_en = motor_enc,
+   .timer = time_rf};
+
+//motor7,8 : right back D
+struct motor_timer time_rb =
+  {.channel = 2, .gpio_alt = 2, .is_comp = 0, .timer = 3};
+
+struct motor_attr attr_rb =
+  {.motor_in1 = motor_in7, .motor_in2 = motor_in8, .motor_en = motor_end,
+   .timer = time_rb};
 
    //enc are not used
-    motor_init(RIGHT_MOTOR, &attr_r, &enc_r);
-    motor_init(LEFT_MOTOR, &attr_l, &enc_l);
+    motor_init(RB_MOTOR, &attr_rb, &enc_rb);
+    motor_init(LB_MOTOR, &attr_lb, &enc_lb);
+    motor_init(RF_MOTOR, &attr_rf, &enc_rb);
+    motor_init(LF_MOTOR, &attr_lf, &enc_lb);
 
-    sys_motor_set(LEFT_MOTOR, MIN_DUTY_CYCLE, STOP);
-    sys_motor_set(RIGHT_MOTOR, MIN_DUTY_CYCLE, STOP);
+    sys_motor_set(LB_MOTOR, MIN_DUTY_CYCLE, FORWARD);
+    sys_motor_set(RB_MOTOR, MIN_DUTY_CYCLE, STOP);
+    sys_motor_set(LF_MOTOR, MIN_DUTY_CYCLE, FORWARD);
+    sys_motor_set(RF_MOTOR, MIN_DUTY_CYCLE, STOP);
     while (1) {
     }
     return 0;
