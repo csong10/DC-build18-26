@@ -2,8 +2,9 @@
 """
 RC Car "Phone Driver" - Autonomous Navigation
 ==============================================
-The Phone is mounted ON the robot.
+The Phone is mounted ON the robot (Robot = Phone Position).
 The Robot drives to the HARDCODED destination below.
+
 Includes:
 - Face Detection (Safety Stop)
 - Obstacle Avoidance (Path of Least Resistance)
@@ -39,12 +40,11 @@ ARDUINO_PORT = '/dev/ttyACM0'
 ARDUINO_BAUDRATE = 9600
 
 # Thresholds
-DANGER_DISTANCE = 40.0        
-SAFE_DISTANCE = 100.0         
+DANGER_DISTANCE = 40.0        # Stop if face is closer than this
+SAFE_DISTANCE = 100.0         # Avoid obstacles closer than this
 OBSTACLE_AREA_THRESHOLD = 0.08
-TURN_DURATION = 0.5
-WAYPOINT_REACHED_DISTANCE = 3.0
-HEADING_TOLERANCE = 15.0
+WAYPOINT_REACHED_DISTANCE = 3.0 # Meters
+HEADING_TOLERANCE = 15.0        # Degrees
 
 # GPS Config
 GPS_UDP_IP = "0.0.0.0"
@@ -76,8 +76,18 @@ def parse_gprmc(line):
     except: pass
     return None
 
+def parse_gpgga(line):
+    try:
+        parts = line.split(',')
+        if len(parts) < 10 or int(parts[6] or 0) == 0: return None
+        lat = parse_nmea_coordinate(parts[2], parts[3])
+        lon = parse_nmea_coordinate(parts[4], parts[5])
+        if lat and lon: return {'lat': lat, 'lon': lon}
+    except: pass
+    return None
+
 def haversine(lat1, lon1, lat2, lon2):
-    R = 6371000
+    R = 6371000 # Earth radius in meters
     p1, p2 = math.radians(lat1), math.radians(lat2)
     dp = math.radians(lat2 - lat1)
     dl = math.radians(lon2 - lon1)
@@ -156,19 +166,28 @@ class RCCarController:
             try:
                 data, _ = self.gps_socket.recvfrom(1024)
                 line = data.decode('utf-8').strip()
+                
+                res = None
                 if '$GPRMC' in line:
                     res = parse_gprmc(line)
-                    if res:
-                        d = haversine(res['lat'], res['lon'], DESTINATION_LAT, DESTINATION_LON)
-                        b = calc_bearing(res['lat'], res['lon'], DESTINATION_LAT, DESTINATION_LON)
-                        with self.data_lock:
-                            self.robot_lat = res['lat']
-                            self.robot_lon = res['lon']
-                            # ONLY update heading if moving (>0 speed implies valid course)
-                            if res['course'] > 0: 
-                                self.robot_heading = res['course']
-                            self.dist_to_dest = d
-                            self.bearing_to_dest = b
+                elif '$GPGGA' in line:
+                    res = parse_gpgga(line)
+                
+                if res:
+                    # Calculate navigation FROM Robot (Phone) TO Destination
+                    d = haversine(res['lat'], res['lon'], DESTINATION_LAT, DESTINATION_LON)
+                    b = calc_bearing(res['lat'], res['lon'], DESTINATION_LAT, DESTINATION_LON)
+                    
+                    with self.data_lock:
+                        self.robot_lat = res['lat']
+                        self.robot_lon = res['lon']
+                        
+                        # Only update heading if we have speed/course info (GPRMC)
+                        if 'course' in res and res['course'] > 0: 
+                            self.robot_heading = res['course']
+                            
+                        self.dist_to_dest = d
+                        self.bearing_to_dest = b
             except: pass
 
     def camera_thread(self):
@@ -178,7 +197,7 @@ class RCCarController:
                 if frame is None: continue
                 gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
                 
-                # Face
+                # Face Detection
                 f_dist = None
                 if self.face_cascade:
                     faces = self.face_cascade.detectMultiScale(gray, 1.1, 4)
@@ -186,9 +205,9 @@ class RCCarController:
                         w = faces[0][2]
                         f_dist = (14.0 * 500) / w # Approx focal calc
                 
-                # Obstacle
+                # Obstacle Detection
                 edges = cv2.Canny(cv2.GaussianBlur(gray, (5,5), 0), 50, 150)
-                roi = edges[160:, :] # Bottom 2/3
+                roi = edges[160:, :] # Bottom 2/3 of screen
                 h, w = roi.shape
                 
                 left_sum = np.sum(roi[:, :w//2])
@@ -216,15 +235,17 @@ class RCCarController:
             
             cmd = "stop"
             
-            # 1. Safety
+            # PRIORITY 1: Safety (Face)
             if f_dist and f_dist < DANGER_DISTANCE:
                 self.current_mode = "STOP (Face)"
                 cmd = "stop"
+            
+            # PRIORITY 2: Obstacle Avoidance
             elif obs:
                 self.current_mode = f"AVOID ({clr})"
                 cmd = clr # 'left' or 'right'
             
-            # 2. Navigation
+            # PRIORITY 3: GPS Navigation
             elif dist is not None:
                 if dist < WAYPOINT_REACHED_DISTANCE:
                     self.current_mode = "ARRIVED"
@@ -233,6 +254,8 @@ class RCCarController:
                     turn = bearing_to_turn(head, bear)
                     self.current_mode = f"NAV: {turn} ({dist:.1f}m)"
                     cmd = turn
+            
+            # PRIORITY 4: No GPS Signal
             else:
                 self.current_mode = "WAITING GPS"
                 cmd = "stop"
@@ -242,32 +265,40 @@ class RCCarController:
                 print(f"[MOTOR] {cmd.upper()} | {self.current_mode}")
                 last_cmd = cmd
             time.sleep(0.1)
-    
+            
     def status_thread(self):
+        """Prints status updates every 2 seconds"""
         while self.running:
             with self.data_lock:
-                print(f"[STATUS] {self.current_mode} | Loc: {self.robot_lat},{self.robot_lon} | Hdg: {self.robot_heading:.1f}")
+                lat = self.robot_lat if self.robot_lat else 0.0
+                lon = self.robot_lon if self.robot_lon else 0.0
+                print(f"[STATUS] {self.current_mode} | Robot: {lat:.6f},{lon:.6f} | Hdg: {self.robot_heading:.1f}")
             time.sleep(2.0)
 
     def start(self):
         if not self.initialize(): return
         
+        # Start all threads
         threading.Thread(target=self.camera_thread, daemon=True).start()
         threading.Thread(target=self.gps_thread, daemon=True).start()
         threading.Thread(target=self.motor_thread, daemon=True).start()
         threading.Thread(target=self.status_thread, daemon=True).start()
         
-        print("\n=== SYSTEM RUNNING ===")
-        print(f"Goal: {DESTINATION_LAT}, {DESTINATION_LON}")
-        print("CTRL+C to Stop")
+        print("\n" + "="*50)
+        print(" RC CAR AUTONOMOUS DRIVER (PHONE MODE)")
+        print(f" DESTINATION: {DESTINATION_LAT}, {DESTINATION_LON}")
+        print(" CTRL+C to Stop")
+        print("="*50 + "\n")
         
         try:
             while True: time.sleep(1)
         except KeyboardInterrupt:
             self.running = False
+            self.arduino.write(b'S')
             self.arduino.close()
             self.picam2.stop()
-            print("\nStopped.")
+            self.gps_socket.close()
+            print("\n[MAIN] System Stopped.")
 
 if __name__ == "__main__":
     RCCarController().start()
