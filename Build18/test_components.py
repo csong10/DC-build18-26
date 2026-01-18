@@ -71,8 +71,8 @@ def test_bluetooth():
         scanner = Scanner()
         
         print("\nScanning for 5 seconds...")
-        for i in range(5):
-            devices = scanner.scan(1.0)
+        for i in range(10):
+            devices = scanner.scan(0.5)
             found = False
             
             for dev in devices:
